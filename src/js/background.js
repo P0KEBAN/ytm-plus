@@ -614,6 +614,9 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       
       try {
         let lrcMap = {};
+        // 訳文と同じ応答に、それを作る元になった歌詞が入っている。
+        // 表示中の歌詞と別バージョンのことがあるため、行の対応付けに必要になる。
+        let sourceLyrics = '';
         if (translateTo.length) {
           const hubRes = await API.withTimeout(
             API.fetchFromLrchub({
@@ -633,12 +636,14 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
             ...API.normalizeLrchubTranslations(hubRes?.translations),
             ...API.normalizeLrchubTranslations(hubRes?.lrcMap)
           };
+          sourceLyrics = typeof hubRes?.lyrics === 'string' ? hubRes.lyrics : '';
         }
 
         if (Object.keys(lrcMap).length) {
           sendResponse({
             success: true,
             lrcMap,
+            sourceLyrics,
             missing: reqLangs.filter(l => !lrcMap[API.toUiLangKey(l)])
           });
           return;
@@ -647,6 +652,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         sendResponse({
           success: true,
           lrcMap: {},
+          sourceLyrics,
           missing: reqLangs
         });
       } catch (e) {

@@ -1978,6 +1978,7 @@ async function applyLateLyricsUpgrade(payload) {
     ...normalizeTranslationsToLrcMapLocal(payload.translations),
     ...normalizeTranslationsToLrcMapLocal(payload.lrcMap),
   };
+  lyricsTranslationSourceText = extractTranslationSourceLyrics(payload);
   dynamicLines = selected.dynamicLines;
   duetSubLyricsRaw = typeof payload.subLyrics === 'string' ? payload.subLyrics : '';
   duetSubDynamicLines = null;
@@ -2777,6 +2778,29 @@ function setupScrollResumeEvents() {
 // ===================== 歌詞＋翻訳適用 =====================
 
 let lyricsTranslationMap = {};
+// 訳文が作られた元になった歌詞。表示中の歌詞（base）とは別バージョンのことが
+// あるため、行の対応付け（buildAlignedTranslations）で介在させる。
+let lyricsTranslationSourceText = '';
+
+// 歌詞APIの応答から、訳文の元になった歌詞本文を取り出す。
+const extractTranslationSourceLyrics = (payload) => {
+  if (!payload || typeof payload !== 'object') return '';
+  // 訳文を伴わない応答の歌詞は翻訳元ではない。歌詞ソースが YouTube Music の
+  // ときにその歌詞を翻訳元と取り違えると、対応表が丸ごと嘘になる。
+  if (!payload.translations && !payload.lrcMap && !payload.lrc_map) return '';
+  const fields = [
+    payload.synced_lyrics,
+    payload.syncedLyrics,
+    payload.lyrics,
+    payload.lrc,
+    payload.plain_lyrics,
+    payload.plainLyrics
+  ];
+  for (const value of fields) {
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return '';
+};
 
 const normalizeTranslationLangKey = (lang) => {
   const key = String(lang || '').trim().toLowerCase();
@@ -2878,6 +2902,7 @@ async function applyTranslations(baseLines, youtubeUrl) {
   if (!langsToFetch.length) return baseLines;
 
   let lrcMap = config.useSharedTranslateApi ? { ...(lyricsTranslationMap || {}) } : {};
+  let translationSourceFromServer = '';
   if (config.useSharedTranslateApi) {
     try {
       const missingLangs = langsToFetch.filter(lang => !lrcMap[normalizeTranslationLangKey(lang)]);
@@ -2903,9 +2928,13 @@ async function applyTranslations(baseLines, youtubeUrl) {
             ...normalizeTranslationsToLrcMapLocal(res.translations),
             ...normalizeTranslationsToLrcMapLocal(res.lrcMap)
           };
+          if (typeof res.sourceLyrics === 'string' && res.sourceLyrics.trim()) {
+            translationSourceFromServer = res.sourceLyrics;
+          }
         }
       }
       lyricsTranslationMap = { ...(lyricsTranslationMap || {}), ...lrcMap };
+      if (translationSourceFromServer) lyricsTranslationSourceText = translationSourceFromServer;
     } catch (e) {
       console.warn('GET_TRANSLATION failed', e);
     }
@@ -2947,7 +2976,10 @@ async function applyTranslations(baseLines, youtubeUrl) {
     }
   }
 
-  const alignedMap = buildAlignedTranslations(baseLines, transLinesByLang);
+  const translationSourceLines = lyricsTranslationSourceText
+    ? parseLRCNoFlag(lyricsTranslationSourceText)
+    : null;
+  const alignedMap = buildAlignedTranslations(baseLines, transLinesByLang, translationSourceLines);
   const final = baseLines.map(l => ({ ...l }));
   const getLangTextAt = (langCode, index, baseText) => {
     if (!langCode || langCode === 'original') return baseText;
@@ -2979,7 +3011,86 @@ async function applyTranslations(baseLines, youtubeUrl) {
   return final;
 }
 
-const buildAlignedTranslations = (baseLines, transLinesByLang) => {
+// 演奏マーカーだけの行（♪ / ♫ など）かどうか。歌詞本文ではないので翻訳の対応付けから外す。
+const isMusicMarkerLine = (text) => {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return /^[\s\u266A\u266B\u266C\u2669\u{1F3B5}\u{1F3B6}]+$/u.test(t);
+};
+
+// 対応付けの対象になる歌詞行（空行でも演奏マーカーでもない行）かどうか。
+const isTranslatableLyricLine = (line) => (
+  !!line && typeof line.text === 'string'
+  && line.text.trim() !== ''
+  && !isMusicMarkerLine(line.text)
+);
+
+// 行を突き合わせるための正規化。表記ゆれ（大文字小文字・約物・空白）を落とし、
+// 文字と数字だけを残す。base と翻訳元で同じ規則を使うことだけが重要。
+const normalizeLyricLineForMatch = (text) => String(text ?? '')
+  .toLowerCase()
+  .replace(/[^\p{L}\p{N}]+/gu, ' ')
+  .trim();
+
+// 2つの歌詞行列の最長共通部分列を取り、一致した行の組を返す。
+// 行数が多い曲で計算量が跳ねないよう、規模が大きすぎる場合は諦めて null を返す。
+const matchLyricLineSequences = (baseTexts, sourceTexts) => {
+  const n = baseTexts.length;
+  const m = sourceTexts.length;
+  if (!n || !m || n * m > 1000000) return null;
+  const dp = [];
+  for (let i = 0; i <= n; i++) dp.push(new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = (baseTexts[i] && baseTexts[i] === sourceTexts[j])
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const anchors = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (baseTexts[i] && baseTexts[i] === sourceTexts[j]) {
+      anchors.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return anchors;
+};
+
+// base 行 → 翻訳元行 の対応表を作る。値が -1 の行は対応する翻訳元行が無い。
+// 完全一致した行を錨にして、その隙間は「同じ行の言い換え」とみなし先頭から
+// 1対1で結ぶ。片側に余った行（別バージョンにしか無い行）は対応なしで残す。
+const buildBaseToSourceIndexMap = (baseTexts, sourceTexts) => {
+  const anchors = matchLyricLineSequences(baseTexts, sourceTexts);
+  if (!anchors) return null;
+  const map = new Array(baseTexts.length).fill(-1);
+  let prevBase = 0;
+  let prevSource = 0;
+  const fillGap = (baseEnd, sourceEnd) => {
+    const span = Math.min(baseEnd - prevBase, sourceEnd - prevSource);
+    for (let k = 0; k < span; k++) map[prevBase + k] = prevSource + k;
+  };
+  anchors.forEach(([bi, si]) => {
+    fillGap(bi, si);
+    map[bi] = si;
+    prevBase = bi + 1;
+    prevSource = si + 1;
+  });
+  fillGap(baseTexts.length, sourceTexts.length);
+  return map;
+};
+
+// baseLines: 画面に表示する歌詞。transLinesByLang: 言語ごとの訳文。
+// sourceLines: 訳文が作られた元の歌詞（省略可）。base と別バージョンのことが
+// あるため、渡された場合はこれを介して対応付ける（ROADMAP 4.13）。
+const buildAlignedTranslations = (baseLines, transLinesByLang, sourceLines) => {
   const alignedMap = {};
   const TOL = 0.15;
   Object.keys(transLinesByLang).forEach(lang => {
@@ -2991,25 +3102,38 @@ const buildAlignedTranslations = (baseLines, transLinesByLang) => {
     }
     const hasAnyTime = arr.some(x => x && typeof x.time === 'number');
     if (!hasAnyTime) {
-      // Untimed translations use blank rows only as section separators. Match
-      // non-empty translations to non-empty base lines so timestamp sorting
-      // cannot turn a separator into a translated lyric line.
-      const contentLines = arr.filter(item => (
-        item && typeof item.text === 'string' && item.text.trim() !== ''
-      ));
-      let k = 0;
+      // タイムスタンプの無い訳文では、空行は段落の区切りでしかない。
+      // 空行と演奏マーカー行（♪ など）には対応する訳文が存在しないため、
+      // 対応付けの対象から外す。外さないと訳文を食い潰して以降が全てずれる。
+      const contentLines = arr.filter(isTranslatableLyricLine);
+      const baseContentIndices = [];
       for (let i = 0; i < baseLines.length; i++) {
-        const baseTextRaw = (baseLines[i]?.text ?? '');
-        const isEmptyBaseLine = typeof baseTextRaw === 'string' && baseTextRaw.trim() === '';
-        if (isEmptyBaseLine) { res[i] = ''; continue; }
-        const cand = contentLines[k];
-        if (cand && typeof cand.text === 'string') {
-          const trimmed = cand.text.trim();
-          res[i] = trimmed === '' ? '' : trimmed;
-        } else {
-          res[i] = '';
-        }
-        k++;
+        if (isTranslatableLyricLine(baseLines[i])) baseContentIndices.push(i);
+      }
+
+      // 訳文は「翻訳元の歌詞」の行に1対1で対応している。表示中の歌詞が
+      // YouTube Music 由来などで別バージョンだと行構成が食い違うため、
+      // 翻訳元が取れているときは本文の突き合わせで対応表を作る。
+      const sourceContent = (Array.isArray(sourceLines) ? sourceLines : [])
+        .filter(isTranslatableLyricLine);
+      let baseToTransIndex = null;
+      if (sourceContent.length && sourceContent.length === contentLines.length) {
+        baseToTransIndex = buildBaseToSourceIndexMap(
+          baseContentIndices.map(i => normalizeLyricLineForMatch(baseLines[i].text)),
+          sourceContent.map(line => normalizeLyricLineForMatch(line.text))
+        );
+      }
+
+      baseContentIndices.forEach((baseIndex, k) => {
+        const transIndex = baseToTransIndex ? baseToTransIndex[k] : k;
+        const cand = transIndex >= 0 ? contentLines[transIndex] : null;
+        // 対応する訳文が無い行は null にして原文へフォールバックさせる。
+        // '' を入れると getLangTextAt が有効値として返し、主表示言語が翻訳の
+        // ときに歌詞本文そのものが空になってしまう。
+        res[baseIndex] = cand ? cand.text.trim() : null;
+      });
+      for (let i = 0; i < baseLines.length; i++) {
+        if (!isTranslatableLyricLine(baseLines[i])) res[i] = '';
       }
       alignedMap[lang] = res;
       return;
@@ -3902,6 +4026,7 @@ async function selectCandidateById(candId) {
     ...normalizeTranslationsToLrcMapLocal(cand.translations),
     ...normalizeTranslationsToLrcMapLocal(cand.lrcMap)
   };
+  lyricsTranslationSourceText = extractTranslationSourceLyrics(cand);
   setLyricsMeaningData(cand);
   updateLyricsSourceState({ lyricsSource: 'lrchub', fallbackUsed: false }, false);
   duetSubDynamicLines = null;
@@ -5474,6 +5599,7 @@ async function loadLyrics(meta, options = {}) {
   lyricsConfig = null;
   lyricsLockState = null;
   lyricsTranslationMap = {};
+  lyricsTranslationSourceText = '';
   setLyricsMeaningData(null);
   let data = null;
   let dataPriority = 0;
@@ -5518,6 +5644,7 @@ async function loadLyrics(meta, options = {}) {
             ...normalizeTranslationsToLrcMapLocal(cached.translations),
             ...normalizeTranslationsToLrcMapLocal(cached.lrcMap)
           };
+          lyricsTranslationSourceText = extractTranslationSourceLyrics(cached);
         }
         if (cached.meaningData) setLyricsMeaningData(cached.meaningData);
         currentLyricsResultPriority = cached.manualLyrics ? 3 : (cachedLrcLibIsFallback ? 1 : 2);
@@ -5642,6 +5769,7 @@ async function loadLyrics(meta, options = {}) {
           ...normalizeTranslationsToLrcMapLocal(late.translations),
           ...normalizeTranslationsToLrcMapLocal(late.lrcMap),
         };
+        lyricsTranslationSourceText = extractTranslationSourceLyrics(late) || lyricsTranslationSourceText;
         const lateMeaning = normalizeMeaningPayloadLocal(late);
         if (lateMeaning) setLyricsMeaningData(lateMeaning);
         syncLyricsLockState();
@@ -5734,6 +5862,7 @@ async function loadLyrics(meta, options = {}) {
       ...normalizeTranslationsToLrcMapLocal(res?.translations),
       ...normalizeTranslationsToLrcMapLocal(res?.lrcMap)
     };
+    lyricsTranslationSourceText = extractTranslationSourceLyrics(res) || lyricsTranslationSourceText;
     refreshCandidateMenu();
     refreshLockMenu();
     const nextMeaningData = normalizeMeaningPayloadLocal(res);
@@ -6732,6 +6861,7 @@ const tick = async () => {
     lyricsConfig = null;
     lyricsLockState = null;
     lyricsTranslationMap = {};
+    lyricsTranslationSourceText = '';
     setLyricsMeaningData(null);
     hideMeaningSummaryPopup();
     lastActiveIndex = -1;
