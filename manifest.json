@@ -42,6 +42,26 @@
         "src/css/style.css"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://music.youtube.com/*"
+      ],
+      "js": [
+        "src/js/probe/probe-isolated.js",
+        "src/js/probe/probe-isolated-2.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://music.youtube.com/*"
+      ],
+      "js": [
+        "src/js/probe/probe-main.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
     }
   ],
   "web_accessible_resources": [
@@ -52,6 +72,14 @@
       ],
       "matches": [
         "<all_urls>"
+      ]
+    },
+    {
+      "resources": [
+        "src/js/probe/*.js"
+      ],
+      "matches": [
+        "https://music.youtube.com/*"
       ]
     }
   ],
