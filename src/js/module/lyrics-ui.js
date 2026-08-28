@@ -5857,6 +5857,9 @@ async function loadLyrics(meta, options = {}) {
 // Segmenter の生成は重いため1回だけ作って使い回す
 const _jaWordSegmenter = new Intl.Segmenter('ja', { granularity: 'word' });
 
+// 戻り値は innerHTML に入る（renderLyrics）。text は LRCLib / LRCHub / 翻訳APIから
+// 来る外部データで、LRCLib は誰でも歌詞を投稿できる公開DBのため、投稿者が制御する
+// 文字列がそのまま DOM に入りうる。各文節は escapeHtml を通してから組み立てる。
 const optimizeLineBreaks = (text) => {
   if (!text) return '';
 
@@ -5894,7 +5897,7 @@ const optimizeLineBreaks = (text) => {
     buffer += word;
 
     if (!next) {
-      html += `<span class="lyric-phrase">${buffer}</span>`;
+      html += `<span class="lyric-phrase">${escapeHtml(buffer)}</span>`;
       break;
     }
 
@@ -5925,7 +5928,7 @@ const optimizeLineBreaks = (text) => {
       continue;
     }
 
-    html += `<span class="lyric-phrase">${buffer}</span>`;
+    html += `<span class="lyric-phrase">${escapeHtml(buffer)}</span>`;
     buffer = '';
   }
 
@@ -6059,7 +6062,9 @@ function renderLyrics(data) {
     row.appendChild(mainSpan);
 
     if (line && line.translation) {
-      const subSpan = createEl('span', '', 'lyric-translation', line.translation);
+      // 翻訳文も歌詞と同じ外部データ。createEl の第4引数は innerHTML に入るため使わない。
+      const subSpan = createEl('span', '', 'lyric-translation');
+      subSpan.textContent = line.translation;
       row.appendChild(subSpan);
       row.classList.add('has-translation');
     }
