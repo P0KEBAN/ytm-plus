@@ -119,6 +119,115 @@
     return out;
   };
 
+
+  // -------------------------------------------------------------------
+  // 4b: 書き込み経路の実測（可逆・実行後に必ず元へ戻す）
+  //   音量とリピートだけを扱う。シャッフルは触らない
+  //   （ONにするとキューが並び替わり、OFFに戻しても元の順序に復元されないため）。
+  // -------------------------------------------------------------------
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const readVol = () => {
+    const bar = document.querySelector('ytmusic-player-bar');
+    const mp = document.querySelector('#movie_player');
+    const v = document.querySelector('video');
+    const slider = document.querySelector('ytmusic-player-bar #volume-slider')
+      || document.querySelector('ytmusic-player-bar tp-yt-paper-slider');
+    return {
+      barVolume: g(bar, 'volume'),
+      mpVolume: call(mp, 'getVolume'),
+      videoVolume: v ? Math.round(v.volume * 1000) / 1000 : null,
+      sliderSel: slider ? slider.tagName.toLowerCase() + (slider.id ? '#' + slider.id : '') : null,
+      sliderValue: slider ? (slider.value != null ? slider.value : slider.getAttribute('value')) : null,
+    };
+  };
+
+  const volumeWriteTest = async () => {
+    const bar = document.querySelector('ytmusic-player-bar');
+    const mp = document.querySelector('#movie_player');
+    const v = document.querySelector('video');
+    const before = readVol();
+    const out = { before, routes: {} };
+    try {
+      if (mp && typeof mp.setVolume === 'function') {
+        mp.setVolume(42);
+        await sleep(800);
+        out.routes.moviePlayerSetVolume = readVol();
+        mp.setVolume(before.mpVolume);
+        await sleep(500);
+      }
+      if (v) {
+        v.volume = 0.42;
+        await sleep(800);
+        out.routes.videoVolumeDirect = readVol();
+        v.volume = before.videoVolume;
+        await sleep(500);
+      }
+      if (bar && typeof bar.updateVolume === 'function') {
+        try { bar.updateVolume(42); } catch (e) { out.routes.updateVolumeThrew = String(e && e.message); }
+        await sleep(800);
+        out.routes.barUpdateVolume = readVol();
+        try { bar.updateVolume(before.barVolume); } catch (e) { /* 復元は下の finally でも行う */ }
+        await sleep(500);
+      }
+    } finally {
+      try { if (mp && typeof mp.setVolume === 'function') mp.setVolume(before.mpVolume); } catch (e) { /* noop */ }
+      await sleep(400);
+      out.after = readVol();
+      out.restored = out.after.mpVolume === before.mpVolume;
+    }
+    return out;
+  };
+
+  const repeatWriteTest = async () => {
+    const bar = document.querySelector('ytmusic-player-bar');
+    const orig = g(bar, 'repeatMode');
+    const out = { original: orig, steps: [] };
+    // 経路A: Polymer のハンドラを直接呼ぶ
+    try { bar.onRepeatButtonClick(); out.handlerCall = 'ok'; }
+    catch (e) { out.handlerCall = 'ERR: ' + String(e && e.message); }
+    await sleep(700);
+    out.steps.push({ via: 'onRepeatButtonClick', repeatMode: g(bar, 'repeatMode') });
+    // 経路B: 可視な DOM ボタンをクリックして元の状態まで戻す
+    for (let i = 0; i < 4 && g(bar, 'repeatMode') !== orig; i++) {
+      const el = Array.from(document.querySelectorAll('ytmusic-player-bar .repeat'))
+        .find((e) => e.offsetParent);
+      const btn = el && (el.querySelector('button') || el);
+      if (!btn) { out.domClick = 'ボタンが見つからない'; break; }
+      btn.click();
+      await sleep(700);
+      out.steps.push({ via: 'domClick', repeatMode: g(bar, 'repeatMode') });
+    }
+    out.domClick = out.domClick || 'ok';
+    out.restored = g(bar, 'repeatMode') === orig;
+    return out;
+  };
+
+  // 4c: キューの正本がどこにあるか。scan で queue.store が見つかったので中を見る
+  const readQueueStore = () => {
+    const bar = document.querySelector('ytmusic-player-bar');
+    const q = g(bar, 'queue');
+    const store = q && q.store;
+    if (!store || typeof store.getState !== 'function') {
+      return { available: false, queueKeys: q ? Object.keys(q).slice(0, 30) : null };
+    }
+    let st;
+    try { st = store.getState(); } catch (e) { return { available: true, error: String(e && e.message) }; }
+    const out = { available: true, topLevelKeys: Object.keys(st || {}) };
+    const qs = st && (st.queue || st.player);
+    if (qs) {
+      out.queueKeys = Object.keys(qs).slice(0, 40);
+      for (const k of ['repeatMode', 'shuffleEnabled', 'selectedItemIndex', 'index']) {
+        if (k in qs) out[k] = qs[k];
+      }
+      if (Array.isArray(qs.items)) {
+        out.itemsLength = qs.items.length;
+        if (qs.items[0]) out.itemFirstKeys = Object.keys(qs.items[0]).slice(0, 20);
+      }
+    }
+    return out;
+  };
+
   const scan = () => ({
     ok: true,
     world: 'MAIN',
@@ -140,6 +249,19 @@
       let st;
       try { st = readState(); } catch (e) { st = { error: String(e && e.message || e) }; }
       window.postMessage({ source: 'ytmplus-probe-main', cmd: 'state', payload: st }, '*');
+      return;
+    }
+    if (d.cmd === 'write') {
+      (async () => {
+        const payload = {};
+        try { payload.volume = await volumeWriteTest(); }
+        catch (e) { payload.volume = { error: String(e && e.stack || e) }; }
+        try { payload.repeat = await repeatWriteTest(); }
+        catch (e) { payload.repeat = { error: String(e && e.stack || e) }; }
+        try { payload.queueStore = readQueueStore(); }
+        catch (e) { payload.queueStore = { error: String(e && e.message || e) }; }
+        window.postMessage({ source: 'ytmplus-probe-main', cmd: 'write', payload }, '*');
+      })();
       return;
     }
     if (d.cmd !== 'scan') return;

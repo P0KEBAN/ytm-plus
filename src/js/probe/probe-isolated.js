@@ -284,13 +284,33 @@
     R.mainWorld = await askMainWorld();
     render();
 
-    console.log('%c' + TAG + ' ▶ これから30秒間、状態の変化を記録します。'
-      + 'YTM のシャッフル / リピート / 音量スライダーを何回か操作してください。',
+    console.log('%c' + TAG + ' ▶ 書き込み経路を実測します（約12秒）。'
+      + '音量とリピートを一時的に変更し、必ず元へ戻します。シャッフルには触れません。',
       'font-weight:bold;color:#c60');
-    R.watch = await watch(30);
-    console.log('%c' + TAG + ' ▶ 記録終了（' + R.watch.length + ' パターン）。下の1行もコピーしてください。',
+    R.write = await new Promise((resolve) => {
+      const onMsg = (ev) => {
+        if (ev.source !== window) return;
+        const d = ev.data;
+        if (!d || d.source !== 'ytmplus-probe-main' || d.cmd !== 'write') return;
+        window.removeEventListener('message', onMsg);
+        resolve(d.payload);
+      };
+      window.addEventListener('message', onMsg);
+      window.postMessage({ source: 'ytmplus-probe-isolated', cmd: 'write' }, '*');
+      setTimeout(() => {
+        window.removeEventListener('message', onMsg);
+        resolve({ error: 'MAIN world から応答なし' });
+      }, 30000);
+    });
+    console.log(TAG + ' 書き込み経路の結果', R.write);
+    const vol = R.write && R.write.volume;
+    const rep = R.write && R.write.repeat;
+    console.log('%c' + TAG + ' 復元: 音量=' + (vol && vol.restored ? 'OK' : 'NG')
+      + ' / リピート=' + (rep && rep.restored ? 'OK' : 'NG')
+      + (vol && vol.before ? '（元の音量 barVolume=' + vol.before.barVolume
+        + ' mpVolume=' + vol.before.mpVolume + '）' : ''),
       'font-weight:bold;color:#0a0');
-    console.log('[YTMPLUS-PROBE-JSON-2] ' + JSON.stringify({ controlDom: R.controlDom,
-      videoState: R.videoState, queueShape: R.mainWorld && R.mainWorld.queueShape, watch: R.watch }));
+    console.log('%c' + TAG + ' ▶ 下の1行をコピーしてください', 'font-weight:bold;color:#0a0');
+    console.log('[YTMPLUS-PROBE-JSON-3] ' + JSON.stringify(R.write));
   }, 4000);
 })();
