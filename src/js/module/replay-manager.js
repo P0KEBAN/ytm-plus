@@ -1,10 +1,18 @@
   const ReplayManager = {
     HISTORY_KEY: 'ytm_local_history',
+    // 再生中のレコードの更新はこちらへ書く。HISTORY_KEY は最大10,000件を保持しており、
+    // chrome.storage.local はキー単位でしか書けないため、末尾1件を更新するだけでも
+    // 全件の直列化が発生する。5秒おきにそれをやると履歴が伸びるほど重くなるので、
+    // 進行中の値だけを単独のキーに分離している。
+    // 読み出し側は loadHistory() が両者をマージした配列を返す。
+    PENDING_KEY: 'ytm_local_history_pending',
     currentVideoId: null,
     hasRecordedCurrent: false,
     isRecording: false,
     currentPlayTime: 0,
     lastSaveTime: 0,
+    // 進行中レコードを history 内で一意に特定するための値。recordNewPlay で設定する。
+    currentRecordTimestamp: null,
 
     currentLyricLines: 0,
     recordedLyricLines: 0,
@@ -27,8 +35,54 @@
       this.currentLyricLines++;
     },
 
-    exportHistory: async function () {
+    // 進行中レコードを反映した履歴を返す。storage 上の HISTORY_KEY は書き換えない。
+    // 履歴を読む処理は全てこれを通すこと。直接 HISTORY_KEY を読むと、再生中の曲の
+    // 再生時間と歌詞行数が最後に確定した時点の値のままになる。
+    loadHistory: async function () {
       const history = await storage.get(this.HISTORY_KEY) || [];
+      const pending = await storage.get(this.PENDING_KEY);
+      if (!pending || history.length === 0) return history;
+
+      const lastIndex = history.length - 1;
+      const last = history[lastIndex];
+      if (!last || last.id !== pending.id || last.timestamp !== pending.timestamp) {
+        return history;
+      }
+
+      // 受け取った配列は書き換えない。chrome.storage.local は毎回コピーを返すため
+      // 実害は出ないが、そこに依存すると storage の実装を差し替えた瞬間に
+      // 「読んだだけで履歴が書き換わる」壊れ方をする。
+      const mergedHistory = history.slice();
+      mergedHistory[lastIndex] = {
+        ...last,
+        duration: pending.duration,
+        lyricLines: pending.lyricLines
+      };
+      return mergedHistory;
+    },
+
+    // 進行中レコードを history 本体へ確定させる。全件の書き戻しが発生するため、
+    // 曲の切り替わりなど頻度の低いタイミングでのみ呼ぶこと。
+    // 前回ブラウザが落ちて pending が残っていた場合も、次にこれが走った時点で回収される。
+    flushPending: async function () {
+      const pending = await storage.get(this.PENDING_KEY);
+      if (!pending) return;
+
+      const history = await storage.get(this.HISTORY_KEY) || [];
+      const lastIndex = history.length - 1;
+      const last = lastIndex >= 0 ? history[lastIndex] : null;
+      if (last && last.id === pending.id && last.timestamp === pending.timestamp) {
+        last.duration = pending.duration;
+        last.lyricLines = pending.lyricLines;
+        await storage.set(this.HISTORY_KEY, history);
+      }
+      // 対象レコードが見つからない pending は、履歴削除やインポートで整合性が
+      // 失われたもの。残しても二度と確定できないので捨てる。
+      await storage.remove(this.PENDING_KEY);
+    },
+
+    exportHistory: async function () {
+      const history = await this.loadHistory();
       if (history.length === 0) {
         alert('保存する履歴データがありません。');
         return;
@@ -56,6 +110,9 @@
             const data = JSON.parse(ev.target.result);
             if (Array.isArray(data)) {
               if (confirm('履歴を復元しますか？\n[OK] 現在の履歴に結合 (マージ)\n[キャンセル] キャンセル')) {
+                // 進行中レコードを先に確定させる。これをしないと、マージ後の履歴に対して
+                // 古い pending が残り、末尾レコードの照合に失敗して破棄されてしまう。
+                await this.flushPending();
                 const current = await storage.get(this.HISTORY_KEY) || [];
                 const existingIds = new Set(current.map(i => i.id + '_' + i.timestamp));
                 const newData = data.filter(i => !existingIds.has(i.id + '_' + i.timestamp));
@@ -92,6 +149,10 @@
         this.lastSaveTime = 0;
         this.currentLyricLines = 0;
         this.recordedLyricLines = 0;
+        this.currentRecordTimestamp = null;
+        // 前の曲の再生時間をここで履歴へ確定させる。全件書き戻しはこのタイミングと
+        // recordNewPlay のときだけ発生する。
+        await this.flushPending();
         return;
       }
 
@@ -137,34 +198,41 @@
         timestamp: Date.now()
       };
 
+      // 直前の曲の pending が残っていれば、この曲を push する前に確定させる。
+      // 先に push すると末尾が入れ替わり、pending の照合先を失う。
+      await this.flushPending();
+
       let history = await storage.get(this.HISTORY_KEY) || [];
       if (history.length > 10000) history = history.slice(-10000);
       history.push(record);
       await storage.set(this.HISTORY_KEY, history);
+      this.currentRecordTimestamp = record.timestamp;
 
       if (ui.replayPanel && ui.replayPanel.classList.contains('active')) {
         this.renderUI();
       }
     },
 
+    // 再生中に5秒おきに呼ばれる。以前はここで履歴を全件読み書きしていたため、
+    // 履歴が伸びるほど再生中ずっと重くなっていた。書き込み先を単独キーへ分離し、
+    // 履歴サイズによらず一定コストで済むようにしている。
     updateDuration: async function () {
-      let history = await storage.get(this.HISTORY_KEY) || [];
-      if (history.length === 0) return;
+      if (!this.currentRecordTimestamp) return;
 
-      const lastIndex = history.length - 1;
-      if (history[lastIndex].id === this.currentVideoId) {
-        history[lastIndex].duration = this.currentPlayTime;
-        history[lastIndex].lyricLines = this.currentLyricLines;
+      await storage.set(this.PENDING_KEY, {
+        id: this.currentVideoId,
+        timestamp: this.currentRecordTimestamp,
+        duration: this.currentPlayTime,
+        lyricLines: this.currentLyricLines
+      });
 
-        await storage.set(this.HISTORY_KEY, history);
-        if (ui.replayPanel && ui.replayPanel.classList.contains('active')) {
-          this.renderUI();
-        }
+      if (ui.replayPanel && ui.replayPanel.classList.contains('active')) {
+        this.renderUI();
       }
     },
 
     getStats: async function (range = 'day') {
-      const history = await storage.get(this.HISTORY_KEY) || [];
+      const history = await this.loadHistory();
       const now = Date.now();
       let threshold = 0;
       if (range === 'day') {
@@ -328,6 +396,8 @@
       document.getElementById('replay-reset-action').onclick = async () => {
         if (confirm(t('replay_reset_confirm'))) {
           await storage.remove(ReplayManager.HISTORY_KEY);
+          // 進行中レコードも一緒に消す。残すと照合先を失った pending がゴミとして居座る。
+          await storage.remove(ReplayManager.PENDING_KEY);
           ReplayManager.renderUI();
         }
       };
@@ -348,6 +418,8 @@
       document.getElementById('replay-reset-action').onclick = async () => {
         if (confirm(t('replay_reset_confirm'))) {
           await storage.remove(ReplayManager.HISTORY_KEY);
+          // 進行中レコードも一緒に消す。残すと照合先を失った pending がゴミとして居座る。
+          await storage.remove(ReplayManager.PENDING_KEY);
           ReplayManager.renderUI();
         }
       };

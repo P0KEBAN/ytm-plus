@@ -5048,6 +5048,8 @@ function createReplayPanel() {
   document.getElementById('replay-reset-action').onclick = async () => {
     if (confirm(t('replay_reset_confirm'))) {
       await storage.remove(ReplayManager.HISTORY_KEY);
+          // 進行中レコードも一緒に消す。残すと照合先を失った pending がゴミとして居座る。
+          await storage.remove(ReplayManager.PENDING_KEY);
       ReplayManager.renderUI();
     }
   };
