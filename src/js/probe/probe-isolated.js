@@ -107,6 +107,37 @@
     };
   };
 
+
+  // ---------------------------------------------------------------------
+  // 検証G(4b): シャッフル / リピート / 音量ボタンの DOM 構造
+  //   aria-label はローカライズされる（実測で「リピートオフ」だった）。
+  //   icon 名や aria-pressed のような言語非依存の手掛かりがあるかを見る。
+  // ---------------------------------------------------------------------
+  const collectControlDom = () => {
+    const dump = (sel) => Array.from(document.querySelectorAll(sel)).map((el, i) => {
+      const btn = el.querySelector('button') || el.querySelector('tp-yt-paper-icon-button') || el;
+      const icons = Array.from(el.querySelectorAll('yt-icon, iron-icon'))
+        .map((ic) => ic.getAttribute('icon') || (ic.icon != null ? String(ic.icon) : null));
+      return {
+        nth: i,
+        visible: !!el.offsetParent,
+        cls: typeof el.className === 'string' ? el.className : null,
+        aria: btn.getAttribute('aria-label'),
+        ariaPressed: btn.getAttribute('aria-pressed'),
+        title: btn.getAttribute('title'),
+        icons,
+        html: el.outerHTML.replace(/\s+/g, ' ').slice(0, 700),
+      };
+    });
+    R.controlDom = {
+      repeat: dump('ytmusic-player-bar .repeat'),
+      shuffle: dump('ytmusic-player-bar .shuffle, ytmusic-player-bar .expand-shuffle'),
+      volume: dump('ytmusic-player-bar .volume, ytmusic-player-bar .expand-volume'),
+    };
+    const v = document.querySelector('video');
+    R.videoState = v ? { volume: v.volume, muted: v.muted, paused: v.paused, readyState: v.readyState } : null;
+  };
+
   // ---------------------------------------------------------------------
   // 検証C: 動的 import() で ES モジュールを読み込めるか
   //   これが通れば、新UIは完全に独立したスコープを持てる（平置きの衝突が消える）。
@@ -140,7 +171,7 @@
       const onMsg = (ev) => {
         if (ev.source !== window) return;
         const d = ev.data;
-        if (!d || d.source !== 'ytmplus-probe-main') return;
+        if (!d || d.source !== 'ytmplus-probe-main' || d.cmd !== 'scan') return;
         done = true;
         window.removeEventListener('message', onMsg);
         resolve(d.payload);
@@ -155,6 +186,55 @@
         resolve({ ok: false, error: 'MAIN world から応答なし（world:"MAIN" が効いていない可能性）' });
       }, 5000);
     });
+
+
+  // ---------------------------------------------------------------------
+  // 検証H(4b): 実際に操作したときに、どの読み取り経路が追従するか
+  //   合成クリックはしない。ユーザーがYTMの本物のボタンを押す。
+  //   （シャッフルを合成で往復させるとキュー順が戻らないため）
+  // ---------------------------------------------------------------------
+  const readIsolatedState = () => {
+    const v = document.querySelector('video');
+    const btn = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const b = el.querySelector('button') || el;
+      const ic = el.querySelector('yt-icon, iron-icon');
+      return [b.getAttribute('aria-label'), b.getAttribute('aria-pressed'),
+              ic ? (ic.getAttribute('icon') || (ic.icon != null ? String(ic.icon) : null)) : null].join('|');
+    };
+    return {
+      videoVolume: v ? Math.round(v.volume * 1000) / 1000 : null,
+      videoMuted: v ? v.muted : null,
+      videoPaused: v ? v.paused : null,
+      repeatBtn: btn('ytmusic-player-bar .repeat'),
+      shuffleBtn: btn('ytmusic-player-bar .shuffle'),
+    };
+  };
+
+  const watch = (seconds) => new Promise((resolve) => {
+    const snapshots = [];
+    let last = '';
+    const onMsg = (ev) => {
+      if (ev.source !== window) return;
+      const d = ev.data;
+      if (!d || d.source !== 'ytmplus-probe-main' || d.cmd !== 'state') return;
+      const snap = { t: Math.round(performance.now()), main: d.payload, iso: readIsolatedState() };
+      const key = JSON.stringify([snap.main, snap.iso]);
+      if (key === last) return;
+      last = key;
+      snapshots.push(snap);
+      console.log(TAG + ' 状態が変化 #' + snapshots.length, snap);
+    };
+    window.addEventListener('message', onMsg);
+    const timer = setInterval(
+      () => window.postMessage({ source: 'ytmplus-probe-isolated', cmd: 'state' }, '*'), 400);
+    setTimeout(() => {
+      clearInterval(timer);
+      window.removeEventListener('message', onMsg);
+      resolve(snapshots);
+    }, seconds * 1000);
+  });
 
   const render = () => {
     console.log('%c' + TAG + ' Phase 4a/4b 検証レポート', 'font-weight:bold;font-size:14px');
@@ -182,6 +262,10 @@
     console.table(R.playerBarButtons);
     console.groupEnd();
 
+    console.groupCollapsed(TAG + ' G. シャッフル/リピート/音量ボタンの DOM 構造');
+    console.log(R.controlDom, R.videoState);
+    console.groupEnd();
+
     console.groupCollapsed(TAG + ' F. isolated world から見える Polymer プロパティ');
     console.log(R.isolatedPolymerProps);
     console.groupEnd();
@@ -194,9 +278,19 @@
   setTimeout(async () => {
     collectSelectors();
     collectIsolatedPolymerProps();
+    collectControlDom();
     R.namespace = (window.__YTMPLUS_PROBE_2__ || { ok: false, error: 'probe-isolated-2.js が動いていない' });
     R.dynamicImport = await testDynamicImport();
     R.mainWorld = await askMainWorld();
     render();
+
+    console.log('%c' + TAG + ' ▶ これから30秒間、状態の変化を記録します。'
+      + 'YTM のシャッフル / リピート / 音量スライダーを何回か操作してください。',
+      'font-weight:bold;color:#c60');
+    R.watch = await watch(30);
+    console.log('%c' + TAG + ' ▶ 記録終了（' + R.watch.length + ' パターン）。下の1行もコピーしてください。',
+      'font-weight:bold;color:#0a0');
+    console.log('[YTMPLUS-PROBE-JSON-2] ' + JSON.stringify({ controlDom: R.controlDom,
+      videoState: R.videoState, queueShape: R.mainWorld && R.mainWorld.queueShape, watch: R.watch }));
   }, 4000);
 })();
