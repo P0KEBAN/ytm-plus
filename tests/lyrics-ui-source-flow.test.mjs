@@ -171,9 +171,13 @@ test('a late character-sync event cannot be downgraded by the original line call
     /currentLyricsResultPriority\s*===\s*2\s*&&\s*selected\.quality\s*<=\s*currentLyricsQuality/,
   )
 
+  // 開始マーカーにはログ出力ではなくロジック本体を使う。
+  // 以前は "console.log('[CS] GET_LYRICS response:', res);" を目印にしていたが、
+  // 83df7e4 でログ関数が YTMLog.log へ置き換わった際にこのテストが壊れた。
+  // ログの文言や出力手段は今後も変わりうるため、マーカーにしない。
   const responseSource = sourceBetween(
     lyricsUiSource,
-    "console.log('[CS] GET_LYRICS response:', res);",
+    'const preferYtm = preferYtmSource;',
     "console.error('GET_LYRICS failed', e);",
   )
   assert.match(

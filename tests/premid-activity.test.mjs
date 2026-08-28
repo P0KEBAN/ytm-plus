@@ -56,7 +56,21 @@ function readZipEntries(path) {
   return entries
 }
 
-const packagedEntries = readZipEntries(packagePath)
+// このテストは premid/YTM-Immersion-PreMiD.zip（PreMiD 用の配布パッケージ）を検査するが、
+// 当該ファイルは ytm-plus のリポジトリに存在しない。upstream から失われたのか元から
+// 無かったのかは未確認。
+//
+// Discord Presence の送信経路として PreMiD を採用するかどうかは未決のため
+// （ROADMAP 3.3 / Phase 7）、現時点でこのバイナリ成果物をリポジトリへ追加はしない。
+// 方式が決まるまでスキップし、zip が置かれれば自動的に検査が復活するようにしている。
+const packageExists = fs.existsSync(packagePath)
+const skip = packageExists
+  ? undefined
+  : 'premid/YTM-Immersion-PreMiD.zip が無いためスキップ（Discord Presence の方式が未決のため）'
+
+const premidTest = (name, fn) => test(name, { skip }, fn)
+
+const packagedEntries = packageExists ? readZipEntries(packagePath) : new Map()
 const presenceSource = packagedEntries.get('presence.js')?.toString('utf8')
 const metadata = JSON.parse(packagedEntries.get('metadata.json')?.toString('utf8') || 'null')
 
@@ -214,7 +228,7 @@ function createActivityHarness() {
   }
 }
 
-test('package keeps the official YouTube Music settings and localization', () => {
+premidTest('package keeps the official YouTube Music settings and localization', () => {
   assert.ok(presenceSource)
   assert.ok(packagedEntries.has('YouTube Music.json'))
 
@@ -237,7 +251,7 @@ test('package keeps the official YouTube Music settings and localization', () =>
   assert.equal(metadata.settings.find(setting => setting.id === 'textLayout').values.length, 6)
 })
 
-test('packaged Activity maps song, artist, artwork lyric, and play state', async () => {
+premidTest('packaged Activity maps song, artist, artwork lyric, and play state', async () => {
   const harness = createActivityHarness()
   await harness.update()
 
@@ -258,7 +272,7 @@ test('packaged Activity maps song, artist, artwork lyric, and play state', async
   assert.equal(typeof harness.activity.endTimestamp, 'number')
 })
 
-test('packaged Activity switches pause icon and respects lyric/privacy settings', async () => {
+premidTest('packaged Activity switches pause icon and respects lyric/privacy settings', async () => {
   const harness = createActivityHarness()
   harness.setSnapshot({ playbackState: 'paused' })
   await harness.update()
@@ -283,7 +297,7 @@ test('packaged Activity switches pause icon and respects lyric/privacy settings'
   assert.equal(harness.activity.largeImageKey.includes('logo.png'), true)
 })
 
-test('packaged Activity supports all six text layouts and matching row links', async () => {
+premidTest('packaged Activity supports all six text layouts and matching row links', async () => {
   const expectedLayouts = [
     ['Test Song', 'Test Artist', 'Current lyric line', 'song', 'artist'],
     ['Test Song', 'Current lyric line', 'Test Artist', 'song', 'song'],
@@ -309,7 +323,7 @@ test('packaged Activity supports all six text layouts and matching row links', a
   }
 })
 
-test('packaged Activity defaults an invalid text layout and falls back to album without lyrics', async () => {
+premidTest('packaged Activity defaults an invalid text layout and falls back to album without lyrics', async () => {
   const harness = createActivityHarness()
   harness.settings.textLayout = 99
   harness.setSnapshot({ lyric: '' })
@@ -320,7 +334,7 @@ test('packaged Activity defaults an invalid text layout and falls back to album 
   assert.equal(harness.activity.largeImageText, 'Test Album')
 })
 
-test('packaged Activity keeps repeat information while using the play icon', async () => {
+premidTest('packaged Activity keeps repeat information while using the play icon', async () => {
   const harness = createActivityHarness()
   harness.setRepeatMode('ONE')
   await harness.update()
@@ -332,7 +346,7 @@ test('packaged Activity keeps repeat information while using the play icon', asy
   assert.equal(harness.activity.smallImageText, 'Playing • On loop')
 })
 
-test('packaged Activity falls back to the official Media Session path', async () => {
+premidTest('packaged Activity falls back to the official Media Session path', async () => {
   const harness = createActivityHarness()
   harness.setBridgeEnabled(false)
   harness.mediaSession.playbackState = 'playing'
