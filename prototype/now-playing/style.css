@@ -82,9 +82,9 @@ body.high-contrast .view-switch button[aria-pressed='true'] { background: #45616
 .queue-item strong { display: block; font-size: 28px; overflow-wrap: anywhere; }
 .queue-item span { display: block; font-size: 21px; margin-top: 10px; }
 .queue-item[aria-current='true'] { background: #001a2366; }
-.view-switch { position: fixed; right: calc(38px * var(--scale)); bottom: calc(32px * var(--scale)); display: flex; align-items: center; width: var(--sw-w, 151px); height: var(--sw-h, 56px); padding: var(--sw-pad, 4px); border-radius: var(--sw-radius, 28px); background: rgb(var(--sw-tint, 196 196 196) / var(--sw-bg, .5)); backdrop-filter: blur(var(--sw-blur, 0px)); transform: scale(var(--scale)); transform-origin: bottom right; box-shadow: 0 1px 15px #0000001a; }
-.view-switch button { height: calc(var(--sw-h, 56px) - var(--sw-pad, 4px) * 2); width: calc((var(--sw-w, 151px) - var(--sw-pad, 4px) * 2) / 2); border-radius: var(--sw-btn-radius, 25px); display: flex; justify-content: center; align-items: center; padding: 0; }
-.view-switch button[aria-pressed='true'] { background: rgb(var(--sw-tint, 196 196 196) / var(--sw-sel, .6)); }
+.view-switch { position: fixed; right: calc(38px * var(--scale)); bottom: calc(32px * var(--scale)); display: flex; align-items: center; width: var(--sw-w, 151px); height: var(--sw-h, 56px); padding: var(--sw-pad, 5px); border-radius: var(--sw-radius, 36px); background: rgb(var(--sw-tint, 196 196 196) / var(--sw-bg, .16)); backdrop-filter: blur(var(--sw-blur, 5px)); transform: scale(var(--scale)); transform-origin: bottom right; box-shadow: 0 1px 15px #0000001a; }
+.view-switch button { height: calc(var(--sw-h, 56px) - var(--sw-pad, 5px) * 2); width: calc((var(--sw-w, 151px) - var(--sw-pad, 5px) * 2) / 2); border-radius: var(--sw-btn-radius, 25px); display: flex; justify-content: center; align-items: center; padding: 0; }
+.view-switch button[aria-pressed='true'] { background: rgb(var(--sw-tint, 196 196 196) / var(--sw-sel, .18)); }
 .view-switch .glyph { width: 36px; height: 36px; }
 #options { width: min(430px, calc(100vw - 40px)); max-height: calc(100vh - 50px); overflow: auto; padding: 26px; border: 1px solid #ffffff30; border-radius: 22px; background: #10272bf5; color: white; box-shadow: 0 15px 70px #0006; font-size: 15px; }
 #options::backdrop { background: #00101855; }

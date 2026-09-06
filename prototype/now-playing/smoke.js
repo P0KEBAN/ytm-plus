@@ -8,9 +8,11 @@
   let gl, program, ready = false, moving = true, lastDraw = -Infinity, phase = 0;
   // 調整可能なパラメータ。既定値は「差し替え前とまったく同じ絵」になる値。
   // tune.js（?tune=1 のときだけ動く）から setParams() で上書きされる。
+  // 2026-09-06 に調整パネルで人間が決めた値。PSD の粒を半分に落とし、
+  // 代わりに細かい追加ノイズを乗せ、煙をやや大きく・速く流している。
   const defaults = {
-    grainAmount: 1, noiseAmount: 0, noisePixel: 2,
-    driftAmount: .014, driftSpeed: 1, smokeScale: 1, softness: 0,
+    grainAmount: .5, noiseAmount: .045, noisePixel: 2,
+    driftAmount: .016, driftSpeed: 3, smokeScale: 1.08, softness: 0,
     saturation: 1, brightness: 1, contrast: 1,
   };
   const params = { ...defaults };

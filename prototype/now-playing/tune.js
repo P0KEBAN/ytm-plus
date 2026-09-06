@@ -15,7 +15,7 @@
     { key: 'noiseAmount', label: '追加ノイズの強さ', min: 0, max: .2, step: .005 },
     { key: 'noisePixel', label: '追加ノイズの粒の大きさ(px)', min: 1, max: 8, step: 1 },
     { key: 'driftAmount', label: 'うねりの大きさ', min: 0, max: .05, step: .001, group: '煙' },
-    { key: 'driftSpeed', label: '動きの速さ（倍率）', min: 0, max: 3, step: .05 },
+    { key: 'driftSpeed', label: '動きの速さ（倍率）', min: 0, max: 8, step: .05 },
     { key: 'smokeScale', label: '模様の拡大率', min: .6, max: 2, step: .01 },
     { key: 'softness', label: '追加のぼかし', min: 0, max: 4, step: .1 },
     { key: 'saturation', label: '彩度', min: 0, max: 2, step: .02 },
@@ -25,14 +25,14 @@
 
   // CSS カスタムプロパティ側
   const CSS = [
-    { key: '--sw-bg', label: '背景の不透明度', min: 0, max: 1, step: .02, value: .5 },
-    { key: '--sw-sel', label: '選択部の不透明度', min: 0, max: 1, step: .02, value: .6 },
-    { key: '--sw-blur', label: '背景のぼかし', min: 0, max: 24, step: 1, value: 0, unit: 'px' },
-    { key: '--sw-radius', label: '外側の角丸', min: 0, max: 36, step: 1, value: 28, unit: 'px' },
+    { key: '--sw-bg', label: '背景の不透明度', min: 0, max: 1, step: .02, value: .16 },
+    { key: '--sw-sel', label: '選択部の不透明度', min: 0, max: 1, step: .02, value: .18 },
+    { key: '--sw-blur', label: '背景のぼかし', min: 0, max: 24, step: 1, value: 5, unit: 'px' },
+    { key: '--sw-radius', label: '外側の角丸', min: 0, max: 48, step: 1, value: 36, unit: 'px' },
     { key: '--sw-btn-radius', label: '選択部の角丸', min: 0, max: 36, step: 1, value: 25, unit: 'px' },
     { key: '--sw-h', label: '高さ', min: 36, max: 76, step: 1, value: 56, unit: 'px' },
     { key: '--sw-w', label: '幅', min: 100, max: 220, step: 1, value: 151, unit: 'px' },
-    { key: '--sw-pad', label: '内側の余白', min: 0, max: 10, step: 1, value: 4, unit: 'px' },
+    { key: '--sw-pad', label: '内側の余白', min: 0, max: 10, step: 1, value: 5, unit: 'px' },
   ];
 
   const TINTS = [
