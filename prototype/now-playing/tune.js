@@ -11,14 +11,15 @@
 
   // shader 側（smoke.js の defaults と対応）
   const SMOKE = [
-    { key: 'grainAmount', label: 'PSD由来の粒の強さ', min: 0, max: 2, step: .05 },
-    { key: 'noiseAmount', label: '追加ノイズの強さ', min: 0, max: .2, step: .005 },
-    { key: 'noisePixel', label: '追加ノイズの粒の大きさ(px)', min: 1, max: 8, step: 1 },
-    { key: 'driftAmount', label: 'うねりの大きさ', min: 0, max: .05, step: .001, group: '煙' },
-    { key: 'driftSpeed', label: '動きの速さ（倍率）', min: 0, max: 8, step: .05 },
-    { key: 'smokeScale', label: '模様の拡大率', min: .6, max: 2, step: .01 },
-    { key: 'softness', label: '追加のぼかし', min: 0, max: 4, step: .1 },
-    { key: 'saturation', label: '彩度', min: 0, max: 2, step: .02 },
+    { key: 'spotRadius', label: '色の広がり', min: .2, max: 1.4, step: .01, group: '背景のグラデーション' },
+    { key: 'fieldScale', label: '模様の拡大率', min: .6, max: 2, step: .01 },
+    { key: 'warpAmount', label: 'ゆがみの大きさ', min: 0, max: .5, step: .005, group: 'ゆがみと動き' },
+    { key: 'warpScale', label: 'ゆがみの細かさ', min: .5, max: 8, step: .1 },
+    { key: 'warpSpeed', label: '動きの速さ（倍率）', min: 0, max: 8, step: .05 },
+    { key: 'cloudAmount', label: '雲の濃淡の強さ', min: 0, max: .8, step: .01 },
+    { key: 'grainAmount', label: '粒（ザラザラ）の強さ', min: 0, max: .2, step: .005, group: '粒' },
+    { key: 'noisePixel', label: '粒の大きさ(px)', min: 1, max: 8, step: 1 },
+    { key: 'saturation', label: '彩度', min: 0, max: 2, step: .02, group: '発色' },
     { key: 'brightness', label: '明るさ', min: .6, max: 1.4, step: .01 },
     { key: 'contrast', label: 'コントラスト', min: .6, max: 1.4, step: .01 },
   ];
@@ -161,12 +162,11 @@
     panel.append(title, hint);
 
     const sd = smokeDefaults();
-    let heading = document.createElement('h3'); heading.textContent = '背景の粒（ザラザラ）';
-    panel.append(heading);
     const inputs = [];
     for (const item of SMOKE) {
-      if (item.group === '煙') {
-        heading = document.createElement('h3'); heading.textContent = '背景の煙';
+      if (item.group) {
+        const heading = document.createElement('h3');
+        heading.textContent = item.group;
         panel.append(heading);
       }
       const current = state[item.key] ?? sd[item.key];
@@ -175,8 +175,8 @@
       panel.append(r.wrap);
     }
 
-    heading = document.createElement('h3'); heading.textContent = '右下の切替';
-    panel.append(heading);
+    const switchHeading = document.createElement('h3'); switchHeading.textContent = '右下の切替';
+    panel.append(switchHeading);
     const tint = document.createElement('select');
     tint.setAttribute('aria-label', '切替の色');
     for (const t of TINTS) { const o = document.createElement('option'); o.value = t.value; o.textContent = t.label; tint.append(o); }
