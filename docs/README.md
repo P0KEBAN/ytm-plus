@@ -18,6 +18,12 @@
 | --- | --- |
 | [`YTM-INTERNALS.md`](./YTM-INTERNALS.md) | YouTube Music 内部構造の実測メモ。MAIN world から触れる API、プレイヤーバーの DOM 構造、音量のスケール、キューの正本、content script のスコープ制約。**YTM 側の変更で壊れたときに最初に見る場所** |
 
+`docs/` の外にも、git で追跡している設計ドキュメントがある。
+
+| ファイル | 内容 |
+| --- | --- |
+| [`../prototype/now-playing/SPEC.md`](../prototype/now-playing/SPEC.md) | 新 Now Playing UI の仕様。**UIが必要とする状態と操作の一覧**（Adapter 設計の入力）、モックから採った数値、背景グラデーションの生成レシピ、再現しきれなかった点、検証手順。実装コードの隣に置くほうが乖離しにくいので `docs/` へは移していない |
+
 ## ここに置かないもの
 
 - ユーザー個人の情報、APIキー、トークン、機器固有の設定

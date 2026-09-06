@@ -28,7 +28,7 @@
 
   // 調整パネル（tune.js）から setParams() で上書きされる。
   const defaults = {
-    warpAmount: .24, warpScale: 2.0, warpSpeed: 3, cloudAmount: .22,
+    warpAmount: .24, warpScale: 2.0, warpSpeed: 5, cloudAmount: .22,
     spotRadius: .62, fieldScale: 1.08,
     grainAmount: .05, noisePixel: 2,
     saturation: 1, brightness: 1, contrast: 1,

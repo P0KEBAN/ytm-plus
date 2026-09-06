@@ -283,7 +283,7 @@ WebGL が使えない場合:
 | `fieldScale` | 1.08 | 模様全体の拡大率 |
 | `warpAmount` | .24 | ノイズで座標を歪ませる量 |
 | `warpScale` | 2.0 | その歪みの細かさ |
-| `warpSpeed` | 3 | 動きの速さの倍率 |
+| `warpSpeed` | 5 | 動きの速さの倍率 |
 | `cloudAmount` | .22 | 雲の濃淡の強さ |
 | `grainAmount` | .05 | 粒（ザラザラ）の強さ |
 | `noisePixel` | 2 | 粒1つの大きさ(px)。小さいほど細かい |
@@ -345,8 +345,23 @@ WebGL が使えない場合:
 ## 6. 検証と性能
 
 実際のChromeでファイルを直接開き、PNGと横並びにして自分で比較した。
-証跡はGit対象外の`private-docs/phase5-verification/`に保存してある。
-`comparison.png`は左が提供モック、右が実際のブラウザ描画。`checks.json`は操作検証結果。
+
+**検証は自動化してある。`check.cjs` を実行すること（2026-09-06 に private-docs から
+リポジトリ内へ移した。失うと作り直しが高くつくため）。**
+
+```bash
+YTM_PLAYWRIGHT=<playwrightのパス> node prototype/now-playing/check.cjs
+```
+
+playwright はこのプロジェクトの依存ではないので、場所を環境変数で渡す。
+出力先の既定は `private-docs/phase5-verification/`（git 追跡外）。`YTM_OUT` で変えられる。
+`checks.json` が操作検証の結果、`contrast.json` がコントラスト測定、
+残りは各状態・各画面幅のスクリーンショット。
+
+**見た目を変えたら必ずこれを通すこと。** ただし**これだけでは足りない**。
+アイコンをSVG化したとき、`checks.json` の「pause button changes」は通っていたのに
+再生アイコンが一度も表示されない不具合が残っていた。あの検証は `aria-label` の変化を
+見ていて、実際の描画を見ていなかったためである。**必ずスクリーンショットを人間かAIの目で見ること。**
 
 - 1920×1080で配置・背景を比較し、1440×900、1100×700でも撮影。
 - 通常再生、停止、再生ローディング、歌詞取得中、歌詞なし、歌詞エラー、翻訳ON、長文、低彩度を表示して確認。
