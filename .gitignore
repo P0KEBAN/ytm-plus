@@ -7,3 +7,8 @@ CLAUDE.md
 
 # Docs
 private-docs/
+
+# プロトタイプの実素材
+# 実際のアルバムジャケットは他者の著作物なので、public リポジトリには置かない。
+# 実体は private-docs/prototype-assets/ に置き、無ければ抽象アートで代替される。
+prototype/now-playing/assets/artwork.png

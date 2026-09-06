@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ytm-plus — Now Playing Prototype</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="mock-data.js"></script>
+  <script defer src="assets/smoke-textures.js"></script>
+  <script defer src="smoke.js"></script>
+  <script defer src="player.js"></script>
+  <script defer src="tune.js"></script>
+</head>
+<body>
+  <canvas id="smoke" aria-hidden="true"></canvas>
+  <div class="contrast-veil" aria-hidden="true"></div>
+  <main class="stage" aria-label="再生中の曲">
+    <section class="record" aria-label="曲情報と再生操作">
+      <div class="artwork-wrap"><img id="artwork" src="assets/artwork.png" alt="sakanactionのアルバムジャケット" draggable="false" onerror="this.hidden=true;document.getElementById('abstract-art').hidden=false"><div id="abstract-art" hidden aria-hidden="true"><span></span></div></div>
+      <div class="metadata"><h1 id="title">ミュージック</h1><p id="artist">サカナクション - sacanaction</p></div>
+      <button class="icon more" id="more" aria-label="その他の操作・表示設定" aria-haspopup="dialog"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="4.6" cy="12" r="2.3"/><circle cx="12" cy="12" r="2.3"/><circle cx="19.4" cy="12" r="2.3"/></svg></button>
+      <div class="seek-wrap">
+        <div class="seek-paint" aria-hidden="true"><span id="seek-fill"></span></div>
+        <input id="seek" type="range" min="0" max="240" step="1" value="140" aria-label="再生位置">
+        <div class="time-hint" aria-hidden="true"><span id="elapsed">2:20</span><span id="duration">4:00</span></div>
+      </div>
+      <div class="transport" aria-label="再生操作">
+        <button class="icon shuffle" id="shuffle" aria-label="シャッフル" aria-pressed="false"><svg class="glyph stroked" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.8 7h3.3c1.25 0 2.1.55 2.9 1.65l5.1 6.7c.8 1.1 1.65 1.65 2.9 1.65h4.2"/><path d="M2.8 17h3.3c1.25 0 2.1-.55 2.9-1.65l5.1-6.7C14.9 7.55 15.75 7 17 7h4.2"/><path d="m18.4 4.2 2.8 2.8-2.8 2.8"/><path d="m18.4 14.2 2.8 2.8-2.8 2.8"/></svg></button>
+        <button class="icon previous" id="previous" aria-label="前の曲"><svg class="glyph solid" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.9 7.2 5.3 12l6.6 4.8Z"/><path d="M19.5 7.2 12.9 12l6.6 4.8Z"/></svg></button>
+        <button class="icon play" id="play" aria-label="一時停止"><svg id="pause-icon" class="glyph" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.4" y="3.6" width="5" height="16.8" rx="2"/><rect x="13.6" y="3.6" width="5" height="16.8" rx="2"/></svg><svg id="play-icon" class="glyph solid" viewBox="0 0 24 24" hidden aria-hidden="true"><path d="M8.9 6.6 18.2 12l-9.3 5.4Z"/></svg><span id="spinner" hidden aria-hidden="true"></span></button>
+        <button class="icon next" id="next" aria-label="次の曲"><svg class="glyph solid" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.1 7.2 18.7 12l-6.6 4.8Z"/><path d="M4.5 7.2 11.1 12l-6.6 4.8Z"/></svg></button>
+        <button class="icon repeat" id="repeat" aria-label="リピート：オフ" aria-pressed="false"><svg class="glyph stroked" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 12.2v-1.7A3.9 3.9 0 0 1 7.3 6.6h11.5"/><path d="m16.1 3.9 2.7 2.7-2.7 2.7"/><path d="M20.6 11.8v1.7a3.9 3.9 0 0 1-3.9 3.9H5.2"/><path d="m7.9 20.1-2.7-2.7 2.7-2.7"/></svg><span class="repeat-one" hidden>1</span></button>
+      </div>
+      <p class="playback-message" id="playback-message" role="status"></p>
+    </section>
+    <section class="right-panel" aria-label="歌詞">
+      <div class="lyric-viewport" id="lyric-viewport" tabindex="0" aria-label="同期歌詞。上下キーでスクロール、各行を選ぶとその位置へ移動"><div id="lyric-lines"></div></div>
+      <div id="lyric-message" class="lyric-message" hidden><p id="lyric-message-text" role="status"></p><button id="retry">もう一度読み込む</button></div>
+      <button id="resume-follow" hidden>現在の歌詞に戻る</button>
+      <section id="queue-panel" hidden aria-label="再生する曲"><h2>次に再生</h2><div id="queue-items"></div></section>
+    </section>
+  </main>
+  <div class="view-switch" role="group" aria-label="右側の表示">
+    <button id="lyrics-view" aria-label="歌詞を表示" aria-pressed="true"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.9 6.2h4.2a2.7 2.7 0 0 1 2.7 2.7v3.3c0 3.5-1.7 5.9-5 7.2-.95.35-1.65-.9-.85-1.5 1.4-1.05 2.2-2.15 2.4-3.2H4.9a2.7 2.7 0 0 1-2.7-2.7V8.9a2.7 2.7 0 0 1 2.7-2.7Z"/><path d="M15.6 6.2h4.2a2.7 2.7 0 0 1 2.7 2.7v3.3c0 3.5-1.7 5.9-5 7.2-.95.35-1.65-.9-.85-1.5 1.4-1.05 2.2-2.15 2.4-3.2h-3.45a2.7 2.7 0 0 1-2.7-2.7V8.9a2.7 2.7 0 0 1 2.7-2.7Z"/></svg></button>
+    <button id="queue-view" aria-label="キューを表示" aria-pressed="false"><svg class="glyph stroked" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16"/><path d="M4 12h16"/><path d="M4 16.5h10.5"/></svg></button>
+  </div>
+  <dialog id="options" aria-labelledby="options-title">
+    <div class="dialog-heading"><h2 id="options-title">再生と表示</h2><button id="close-options" aria-label="設定を閉じる">×</button></div>
+    <label class="volume-label" for="volume">音量 <output id="volume-value">42</output></label>
+    <div class="volume-row"><button id="mute" aria-pressed="false">消音</button><input id="volume" type="range" min="0" max="100" step="1" value="42" aria-label="音量"></div>
+    <label class="setting"><span>翻訳を表示</span><input id="translation" type="checkbox"></label>
+    <label class="setting"><span>読みやすさを優先</span><input id="contrast" type="checkbox"></label>
+    <label class="setting"><span>背景を動かす</span><input id="motion" type="checkbox" checked></label>
+    <details class="review"><summary>プロトタイプの確認</summary>
+      <p>音声は流れません。曲と時刻・翻訳は確認用のデータです。</p>
+      <label for="scenario">表示する状態</label>
+      <select id="scenario"><option value="playing">通常再生</option><option value="paused">一時停止</option><option value="loading">再生のローディング</option><option value="lyrics-loading">歌詞を取得中</option><option value="no-lyrics">歌詞なし</option><option value="lyrics-error">歌詞取得エラー</option><option value="translation">翻訳表示 ON</option><option value="long">長い曲名・歌詞（暖色）</option><option value="neutral">低彩度・歌詞なし</option></select>
+      <button id="reset">モックの初期画面へ戻す</button>
+      <p>Space：再生／一時停止 · ← →：5秒移動 · Esc：閉じる／歌詞へ戻る</p>
+    </details>
+  </dialog>
+  <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>
