@@ -5,15 +5,18 @@
 * { box-sizing: border-box; }
 :root { color-scheme: dark; --scale: 1; --foreground: #fff; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-/* WebGL が使えないときに出る静的版。smoke.js が生成するものと同じレシピ。
-   スポットの座標を変えるときは smoke.js の SPOTS も一緒に直すこと。 */
+/* WebGL が使えないときに出る静的版。smoke.js と同じ配色・同じ重ね順だが、
+   **同一ではなく近似**。CSS の radial-gradient は既定で楕円 + farthest-corner なので、
+   シェーダーの正規化座標上の固定半径とは 62% 地点の物理位置が違う。
+   実測で平均 3.82/255・最大 17/255 の差がある（2026-09-07 Codex レビューでの計測）。
+   座標は smoke.js の SPOTS が JS から流し込む。ここでは既定値だけ持つ。 */
 body { background-color: var(--art-base, #000f1d); color: var(--foreground);
   font-family: 'Mock Hiragino', 'Hiragino Sans', sans-serif;
   background-image:
-    radial-gradient(at 20% 26%, var(--art-spot0) 0px, transparent 62%),
-    radial-gradient(at 80% 22%, var(--art-spot1) 0px, transparent 62%),
-    radial-gradient(at 72% 80%, var(--art-spot2) 0px, transparent 62%),
-    radial-gradient(at 24% 76%, var(--art-spot3) 0px, transparent 62%); }
+    radial-gradient(at var(--spot0-x, 20%) var(--spot0-y, 26%), var(--art-spot0) 0px, transparent 62%),
+    radial-gradient(at var(--spot1-x, 80%) var(--spot1-y, 22%), var(--art-spot1) 0px, transparent 62%),
+    radial-gradient(at var(--spot2-x, 72%) var(--spot2-y, 80%), var(--art-spot2) 0px, transparent 62%),
+    radial-gradient(at var(--spot3-x, 24%) var(--spot3-y, 76%), var(--art-spot3) 0px, transparent 62%); }
 button, input, select { font: inherit; }
 button { color: inherit; cursor: pointer; border: 0; background: none; }
 [hidden] { display: none !important; }

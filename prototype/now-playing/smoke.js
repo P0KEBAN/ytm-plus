@@ -22,7 +22,9 @@
   const capture = new URLSearchParams(location.search).get('capture') === '1';
   const media = matchMedia('(prefers-reduced-motion: reduce)');
 
-  // 構図。style.css の body 背景と同じ値を使うこと（片方だけ変えない）。
+  // 構図。**ここが唯一の正本。** シェーダーへは uniform で渡し、
+  // WebGL 不可時の静的版（style.css の body）へは CSS カスタムプロパティで渡す。
+  // 以前は GLSL へ直書きしていて、この配列を変えても絵が変わらなかった。
   const SPOTS = [[.20, .26], [.80, .22], [.72, .80], [.24, .76]];
   const COLOR_KEYS = ['base', 'spot0', 'spot1', 'spot2', 'spot3'];
 
@@ -39,14 +41,30 @@
   let moving = true, lastDraw = -Infinity, phase = 0;
   let target, current;
 
-  const rgb = hex => hex.trim().replace('#', '').match(/../g).map(v => parseInt(v, 16) / 255);
+  // パレットに色が足りなくても、例外で Now Playing の初期化ごと止めない。
+  // 本番では抽出処理の不具合や未知のジャケットで欠けうるため。
+  const FALLBACK = '#101418';
+  function rgb(value, key) {
+    const hex = String(value ?? '').trim().replace('#', '');
+    if (!/^[0-9a-f]{6}$/i.test(hex)) {
+      console.warn(`[smoke] --art-${key} が読めません（値: ${JSON.stringify(value)}）。既定色で代替します。`);
+      return rgb(FALLBACK, key);
+    }
+    return hex.match(/../g).map(v => parseInt(v, 16) / 255);
+  }
 
   function readPalette() {
     const style = getComputedStyle(document.documentElement);
-    target = COLOR_KEYS.flatMap(key => rgb(style.getPropertyValue(`--art-${key}`)));
+    target = COLOR_KEYS.flatMap(key => rgb(style.getPropertyValue(`--art-${key}`), key));
     if (!current) current = target.slice();
     lastDraw = -Infinity;
   }
+
+  // 静的版（style.css の body）へ構図を渡す。SPOTS を二重管理しないため。
+  SPOTS.forEach(([x, y], i) => {
+    document.documentElement.style.setProperty(`--spot${i}-x`, `${x * 100}%`);
+    document.documentElement.style.setProperty(`--spot${i}-y`, `${y * 100}%`);
+  });
 
   function shader(kind, source) {
     const s = gl.createShader(kind); gl.shaderSource(s, source); gl.compileShader(s);
@@ -57,6 +75,7 @@
   const FRAGMENT = `precision highp float;
     varying vec2 uv;
     uniform vec3 base, spot0, spot1, spot2, spot3;
+    uniform vec2 spotPos0, spotPos1, spotPos2, spotPos3;
     uniform float time, warpAmount, warpScale, warpSpeed, cloudAmount;
     uniform float spotRadius, fieldScale, grainAmount, noisePixel;
     uniform float saturation, brightness, contrast;
@@ -91,10 +110,10 @@
       if (fieldScale != 1.0) q = (q - 0.5) / fieldScale + 0.5;
       // CSS の background-image は先頭が最前面。奥から順に重ねる。
       vec3 col = base;
-      col = mix(col, spot3, weight(q, vec2(0.24, 0.76)));
-      col = mix(col, spot2, weight(q, vec2(0.72, 0.80)));
-      col = mix(col, spot1, weight(q, vec2(0.80, 0.22)));
-      col = mix(col, spot0, weight(q, vec2(0.20, 0.26)));
+      col = mix(col, spot3, weight(q, spotPos3));
+      col = mix(col, spot2, weight(q, spotPos2));
+      col = mix(col, spot1, weight(q, spotPos1));
+      col = mix(col, spot0, weight(q, spotPos0));
       // 濃淡。グラデーションを歪ませるだけだと平坦になるので、雲の陰影を重ねる。
       if (cloudAmount > 0.0) {
         float n = fbm(q * warpScale * 1.7 + vec2(t * 0.028, -t * 0.021));
@@ -124,6 +143,7 @@
       gl.enableVertexAttribArray(pos); gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
       uniforms = Object.fromEntries([...Object.keys(defaults), ...COLOR_KEYS, 'time']
         .map(name => [name, gl.getUniformLocation(program, name)]));
+      SPOTS.forEach(([x, y], i) => gl.uniform2f(gl.getUniformLocation(program, `spotPos${i}`), x, y));
       pushParams();
       ready = true; canvas.dataset.renderer = 'webgl'; resize();
     } catch {
