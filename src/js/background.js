@@ -247,9 +247,11 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       );
 
       const getHubLyricsQuality = (hubRes) => {
-        if (hasCharacterSyncedLines(hubRes?.dynamicLines)) return 4;
         const animated = hubRes?.animated_lyrics || hubRes?.timedtext || hubRes?.timed_text;
-        if (typeof animated === 'string' && animated.trim()) return 3;
+        // srv3 はアニメーション表示そのもの。DynamicLRC が先着していても
+        // 後着の srv3 を content script へ届けられるよう最上位にする。
+        if (typeof animated === 'string' && animated.trim()) return 5;
+        if (hasCharacterSyncedLines(hubRes?.dynamicLines)) return 4;
         if (typeof hubRes?.lyrics === 'string' && /\[\d+:\d{2}(?:[.:]\d{1,3})?\]/.test(hubRes.lyrics)) return 2;
         return typeof hubRes?.lyrics === 'string' && hubRes.lyrics.trim() ? 1 : 0;
       };
@@ -449,7 +451,8 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       if (earlyPrimary && earlyPrimary !== earlyMarker) {
         sendHubLyrics(earlyPrimary.res, earlyPrimary.source);
         pushBestResolvedHubUpgrade();
-        if (getHubLyricsQuality(earlyPrimary.res) < 4) {
+        // DynamicLRC (4) が先着していても、最上位の srv3 (5) を検索する。
+        if (getHubLyricsQuality(earlyPrimary.res) < 5) {
           const earlySearchTask = makeRawHubTask(
             'LRCHub search',
             API.fetchFromLrchubSearch({ track, artist, limit: 30, translate_to, video_id: resolvedVideoId }),

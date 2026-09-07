@@ -148,6 +148,38 @@ const forceStyle = pipDoc.createElement('style');
             position: absolute; top: 20px; right: 20px;
         }
 
+        /* srv3 は動画座標の 16:9 ステージを維持して表示する。 */
+        body.ytm-animated-caption-mode #pip-lyrics-container {
+          display: block !important;
+          left: 50%; top: 50%; right: auto; bottom: auto;
+          width: min(100vw, 177.7778vh);
+          height: min(56.25vw, 100vh);
+          padding: 0;
+          overflow: hidden;
+          transform: translate(-50%, -50%);
+          mask-image: none;
+          -webkit-mask-image: none;
+        }
+        body.ytm-animated-caption-mode .ytm-animated-caption-stage {
+          position: relative;
+          width: 100%; height: 100%;
+          overflow: hidden;
+          pointer-events: none;
+        }
+        body.ytm-animated-caption-mode .ytm-animated-caption-cue {
+          position: absolute;
+          display: inline-block;
+          max-width: none;
+          white-space: pre;
+          text-wrap: nowrap;
+          word-break: keep-all;
+          overflow-wrap: normal;
+          font-weight: 800;
+          line-height: 1.18;
+          letter-spacing: 0;
+          will-change: opacity, transform;
+        }
+
         .lyric-line {
       
           font-size: 26px !important; 
@@ -187,6 +219,23 @@ const forceStyle = pipDoc.createElement('style');
         .lyric-line.active .lyric-char { display: inline-block; transition: opacity 0.2s linear; }
         .lyric-line.active .lyric-char.char-pending { opacity: 0.25 !important; }
         .lyric-line.active .lyric-char.char-active { opacity: 1 !important; }
+
+        /* 通常画面と同じく、再生が終わった行は位置を保ったままフェードする。 */
+        #pip-lyrics-container .lyric-line.lyric-past {
+          opacity: 0 !important;
+          visibility: hidden;
+          pointer-events: none;
+          transition: transform 0.5s, color 0.5s, filter 0.5s,
+                      opacity 1.2s ease 0.3s, visibility 0s linear 1.5s !important;
+        }
+        #pip-lyrics-container.ytm-user-browsing-lyrics .lyric-line.lyric-past,
+        body.ytm-keep-past-lyrics #pip-lyrics-container .lyric-line.lyric-past {
+          opacity: 0.3 !important;
+          visibility: visible;
+          pointer-events: auto;
+          transition: transform 0.5s, color 0.5s, filter 0.5s,
+                      opacity 0.2s ease, visibility 0s !important;
+        }
         
         .lyric-translation { font-size: 0.6em; opacity: 0.5; font-weight: 600; margin-top: 4px; display: block; }
         
@@ -273,7 +322,10 @@ const forceStyle = pipDoc.createElement('style');
             
             pipDoc.head.appendChild(forceStyle);
       pipDoc.body.className = 'ytm-pip-mode';
+      if (document.body.classList.contains('ytm-no-lyrics')) pipDoc.body.classList.add('ytm-no-lyrics');
       if (document.body.classList.contains('ytm-no-timestamp')) pipDoc.body.classList.add('ytm-no-timestamp');
+      if (document.body.classList.contains('ytm-animated-caption-mode')) pipDoc.body.classList.add('ytm-animated-caption-mode');
+      if (document.body.classList.contains('ytm-keep-past-lyrics')) pipDoc.body.classList.add('ytm-keep-past-lyrics');
       if (document.body.classList.contains('ytm-singer-colors-enabled')) pipDoc.body.classList.add('ytm-singer-colors-enabled');
 
       const artworkUrl = ui.artwork.querySelector('img')?.src || '';
@@ -327,11 +379,13 @@ pipDoc.body.innerHTML = `
           return;
         }
         this.pipLyricsContainer._isUserScrolling = true;
+        this.pipLyricsContainer.classList.add('ytm-user-browsing-lyrics');
         clearTimeout(userScrollPipTimeout);
         userScrollPipTimeout = setTimeout(() => {
           if (this.pipLyricsContainer) {
             this.pipLyricsContainer._isUserScrolling = false;
             this.pipLyricsContainer._lastScrolledIndex = -1;
+            this.pipLyricsContainer.classList.remove('ytm-user-browsing-lyrics');
           }
         }, 2000);
       }, { passive: true });

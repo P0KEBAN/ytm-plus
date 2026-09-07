@@ -38,6 +38,11 @@ function createResolverHarness({
     getMetadata() {
       return { title: 'Test Song', artist: 'Test Artist' }
     },
+    getActiveTimedTextEvents(events, timeMs, limit = 24) {
+      return events
+        .filter(event => timeMs >= event.startMs && timeMs < event.endMs)
+        .slice(-limit)
+    },
     isLineDynamicallyActiveAtTime(line, time) {
       return Number.isFinite(line?._dynamicRenderStartSec) &&
         Number.isFinite(line?._dynamicRenderEndSec) &&
@@ -94,6 +99,23 @@ test('combines simultaneous lyric rows and includes active dynamic ranges', () =
     harness.resolveCurrentLyric(),
     'Dynamic harmony / Left vocal / Right vocal',
   )
+})
+
+test('returns an intentional gap after a DynamicLRC line has ended', () => {
+  const harness = createResolverHarness({
+    currentTime: 3,
+    dynamicLines: [{ chars: [{ c: 'A', t: 1000 }] }],
+    lyricsData: [
+      { time: 1, text: 'Finished line', _dynamicRenderStartSec: 1, _dynamicRenderEndSec: 2 },
+      { time: 8, text: 'Future line', _dynamicRenderStartSec: 8, _dynamicRenderEndSec: 9 },
+    ],
+  })
+
+  assert.equal(harness.resolveCurrentLyric(), '')
+  harness.currentTime = 8.5
+  assert.equal(harness.resolveCurrentLyric(), 'Future line')
+  harness.currentTime = 10
+  assert.equal(harness.resolveCurrentLyric(), '')
 })
 
 test('distinguishes animated-caption gaps from unavailable timed data', () => {

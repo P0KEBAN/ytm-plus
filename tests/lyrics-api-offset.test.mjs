@@ -114,6 +114,23 @@ test('raw lyrics apply negative offsets and clamp timestamps at zero', () => {
   assert.equal(result.dynamicLines[0].chars[0].t, 0)
 })
 
+test('srv3 XML in documented dynamic aliases is normalized as animated lyrics', () => {
+  const srv3 = '<timedtext format="3"><body><p t="1000" d="34">frame</p></body></timedtext>'
+  const fromDynamicLyrics = api.normalizeLrchubLyricsResponse({
+    lyrics: '[00:01.00]fallback',
+    dynamic_lyrics: srv3,
+  })
+  const fromDynamicLrc = api.normalizeLrchubLyricsResponse({
+    lyrics: '[00:01.00]fallback',
+    dynamic_lrc: srv3,
+  })
+  const fromLyrics = api.normalizeLrchubLyricsResponse({ lyrics: srv3 })
+
+  assert.equal(fromDynamicLyrics.animated_lyrics, srv3)
+  assert.equal(fromDynamicLrc.animated_lyrics, srv3)
+  assert.equal(fromLyrics.animated_lyrics, srv3)
+})
+
 test('a video mismatch never borrows another video offset', () => {
   const payload = {
     video_id: VIDEO_A,
@@ -310,6 +327,26 @@ test('raw flagged animated lyrics shift only after their payload hash is verifie
   assert.match(result.animated_lyrics, /<p t="2200" d="500">/)
   assert.match(result.animated_lyrics, /<s t="120">Hi<\/s>/)
   assert.equal(result.lyrics, result.animated_lyrics)
+  assert.equal(result._ytmAnimatedOffsetAppliedForVideoId, VIDEO_A)
+  assert.equal(result._ytmAnimatedOffsetAppliedMs, 1200)
+})
+
+test('verified srv3 in a dynamic alias follows the animated offset path', async () => {
+  const animated = '<timedtext format="3"><body><p t="1000" d="34">frame</p></body></timedtext>'
+  const result = await api.normalizeRawLrchubLyricsForVideo(
+    {
+      lyrics: '[00:01.00]fallback',
+      dynamic_lyrics: animated,
+      provider_meta: {
+        video_links: [{ video_id: VIDEO_A, offset_ms: 1200 }],
+        animated_lyrics_offset_normalized: true,
+        animated_lyrics_offset_normalized_hash: sha256(animated),
+      },
+    },
+    VIDEO_A,
+  )
+
+  assert.match(result.animated_lyrics, /<p t="2200" d="34">/)
   assert.equal(result._ytmAnimatedOffsetAppliedForVideoId, VIDEO_A)
   assert.equal(result._ytmAnimatedOffsetAppliedMs, 1200)
 })

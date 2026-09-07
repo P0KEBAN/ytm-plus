@@ -15,6 +15,10 @@ const styleSource = fs.readFileSync(
   new URL('../src/css/style.css', import.meta.url),
   'utf8',
 )
+const pipManagerSource = fs.readFileSync(
+  new URL('../src/js/module/pip-manager.js', import.meta.url),
+  'utf8',
+)
 
 function sourceBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker)
@@ -133,7 +137,7 @@ function runFallbackState(payload, config, notify = true) {
   return context.result
 }
 
-test('character-synced payload wins over animated and line-only display modes', () => {
+test('enabled srv3 animation wins over DynamicLRC and line-only display modes', () => {
   const { hasCharacterSyncedLines, selectLyricsPayload } = createPayloadHarness(true)
   const dynamicLines = [{
     start_ms: '1000',
@@ -141,20 +145,28 @@ test('character-synced payload wins over animated and line-only display modes', 
   }]
   const payload = {
     lyrics: '[00:01.00] line lyrics',
-    animated_lyrics: '<timedtext>animated lyrics</timedtext>',
+    animated_lyrics: '<timedtext format="3"><body><p t="1000" d="500">animated lyrics</p></body></timedtext>',
     dynamicLines,
   }
 
   assert.equal(hasCharacterSyncedLines(dynamicLines), true)
   const selected = selectLyricsPayload(payload)
-  assert.equal(selected.text, payload.lyrics)
-  assert.equal(selected.dynamicLines, dynamicLines)
+  assert.equal(selected.text, payload.animated_lyrics)
+  assert.equal(selected.dynamicLines, null)
+  assert.equal(selected.mode, 'animated')
   assert.equal(selected.quality, 4)
 
-  const withoutDynamic = selectLyricsPayload({ ...payload, dynamicLines: null })
-  assert.equal(withoutDynamic.text, payload.animated_lyrics)
-  assert.equal(withoutDynamic.dynamicLines, null)
-  assert.equal(withoutDynamic.quality, 3)
+  const withoutAnimated = selectLyricsPayload({ ...payload, animated_lyrics: '' })
+  assert.equal(withoutAnimated.text, payload.lyrics)
+  assert.equal(withoutAnimated.dynamicLines, dynamicLines)
+  assert.equal(withoutAnimated.mode, 'dynamic')
+  assert.equal(withoutAnimated.quality, 3)
+
+  const animationDisabled = createPayloadHarness(false).selectLyricsPayload(payload)
+  assert.equal(animationDisabled.text, payload.lyrics)
+  assert.equal(animationDisabled.dynamicLines, dynamicLines)
+  assert.equal(animationDisabled.mode, 'dynamic')
+  assert.equal(animationDisabled.quality, 3)
 
   const lineOnly = createPayloadHarness(false).selectLyricsPayload({
     lyrics: payload.lyrics,
@@ -189,6 +201,58 @@ test('a late character-sync event cannot be downgraded by the original line call
     /selectedResponse\.quality\s*===\s*currentLyricsQuality/,
   )
   assert.match(lyricsUiSource, /dataQuality\s*!==\s*currentLyricsQuality/)
+})
+
+test('srv3 can replace preferred YTM lyrics both immediately and after the 400ms race', () => {
+  const lateUpgradeSource = extractFunctionDeclaration(lyricsUiSource, 'applyLateLyricsUpgrade')
+  assert.match(
+    lateUpgradeSource,
+    /currentLyricsFromPreferredYtm[\s\S]*?selected\.mode\s*!==\s*'animated'/,
+  )
+
+  const loadSource = sourceBetween(
+    lyricsUiSource,
+    'const backgroundPromise = new Promise',
+    "console.error('GET_LYRICS failed', e);",
+  )
+  assert.match(loadSource, /selectLyricsPayload\(late\)\.mode\s*===\s*'animated'/)
+  assert.match(loadSource, /applyLateLyricsUpgrade\(late\)/)
+  assert.match(loadSource, /backgroundHasSrv3/)
+  assert.match(loadSource, /!backgroundHasSrv3/)
+})
+
+test('finished DynamicLRC rows become past rows in the main view and PiP', () => {
+  const highlightSource = extractFunctionDeclaration(lyricsUiSource, 'updateLyricHighlight')
+  assert.match(highlightSource, /primaryHasDynamicRange/)
+  assert.match(highlightSource, /primaryIsActive/)
+  assert.match(highlightSource, /primaryDynamicEnded/)
+  assert.match(highlightSource, /classList\.toggle\('lyric-past', isPast\)/)
+
+  assert.match(pipManagerSource, /#pip-lyrics-container \.lyric-line\.lyric-past/)
+  assert.match(pipManagerSource, /ytm-user-browsing-lyrics/)
+  assert.match(pipManagerSource, /ytm-keep-past-lyrics/)
+})
+
+test('srv3 frames are mirrored to the open PiP stage', () => {
+  const renderSource = extractFunctionDeclaration(lyricsUiSource, 'renderAnimatedTimedText')
+  const updateSource = extractFunctionDeclaration(lyricsUiSource, 'updateAnimatedCaptionStage')
+  assert.match(renderSource, /PipManager\.pipLyricsContainer\.innerHTML\s*=\s*ui\.lyrics\.innerHTML/)
+  assert.match(updateSource, /PipManager\.pipLyricsContainer\.querySelector\('\.ytm-animated-caption-stage'\)/)
+  assert.match(updateSource, /availableStages\.forEach/)
+  assert.match(pipManagerSource, /body\.ytm-animated-caption-mode #pip-lyrics-container/)
+})
+
+test('late metadata cannot replace an active srv3 stage with ordinary lyric rows', () => {
+  const metaListenerSource = sourceBetween(
+    lyricsUiSource,
+    "if (msg.type !== 'LYRICS_META_UPDATE') return;",
+    '// candidates/config が更新されたらメニューを再描画',
+  )
+  assert.match(metaListenerSource, /const keepAnimatedStage\s*=\s*!!\(/)
+  assert.match(metaListenerSource, /config\.useAnimatedCaptions/)
+  assert.match(metaListenerSource, /animatedCaptionData/)
+  assert.match(metaListenerSource, /ytm-animated-caption-mode/)
+  assert.match(metaListenerSource, /if \(!keepAnimatedStage\)\s*\{[\s\S]*?renderLyrics\(lyricsData\)/)
 })
 
 test('character-sync detection accepts supported text and timestamp aliases', () => {

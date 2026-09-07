@@ -221,6 +221,47 @@ test('a later character-synced Hub result upgrades an earlier line-synced Hub re
   assertRequestIdentity(updatePayload)
 })
 
+test('a later srv3 result upgrades an earlier DynamicLRC response', async () => {
+  const searchHub = deferred()
+  const neverResolve = () => new Promise(() => {})
+
+  const harness = createBackgroundHarness({
+    api: {
+      delay: neverResolve,
+      fetchFromLrchub: async () => ({
+        lyrics: '[00:01.00]dynamic line',
+        dynamicLines: [{
+          startTimeMs: 1000,
+          chars: [{ c: 'D', t: 1000 }],
+        }],
+      }),
+      fetchFromLrchubSearch: () => searchHub.promise,
+    },
+  })
+
+  harness.dispatch(requestPayload)
+  await flushMicrotasks()
+
+  assert.equal(harness.responses.length, 1)
+  assert.equal(harness.responses[0].lyricsQuality, 4)
+  assert.equal(harness.sentMessages.length, 0)
+
+  const srv3 = '<timedtext format="3"><body><p t="1000" d="500">animated</p></body></timedtext>'
+  searchHub.resolve({
+    lyrics: '[00:01.00]animated line',
+    animated_lyrics: srv3,
+  })
+  await flushMicrotasks()
+
+  assert.equal(harness.responses.length, 1)
+  assert.equal(harness.sentMessages.length, 1)
+  const updatePayload = harness.sentMessages[0].message.payload
+  assert.equal(updatePayload.lyricsQuality, 5)
+  assert.equal(updatePayload.animated_lyrics, srv3)
+  assert.equal(updatePayload.sourceLabel, 'LRCHub search')
+  assertRequestIdentity(updatePayload)
+})
+
 test('the initial Hub payload exposes provider_meta.record_id for singer lookup', async () => {
   const neverResolve = () => new Promise(() => {})
   const harness = createBackgroundHarness({

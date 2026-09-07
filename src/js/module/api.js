@@ -467,6 +467,12 @@ const ANIMATED_LYRICS_FIELDS = [
   'caption_xml',
   'captionXml',
 ];
+const isSrv3TimedText = (value) => (
+  typeof value === 'string' &&
+  /<timedtext\b/i.test(value) &&
+  /<body\b/i.test(value) &&
+  /<p\b/i.test(value)
+);
 const ANIMATED_JSON_MS_KEYS = new Set(['t', 'time_ms', 'start_ms', 'end_ms', 'timestamp_ms']);
 const ANIMATED_JSON_SECOND_KEYS = new Set(['start', 'end', 'time', 'timestamp', 'begin']);
 
@@ -476,6 +482,9 @@ const getAnimatedLyricsEntry = (value) => {
     if (typeof value[key] === 'string' && value[key].trim()) {
       return { key, text: value[key] };
     }
+  }
+  for (const key of ['dynamic_lrc', 'dynamic_lyrics', 'dynamicLrc', 'dynamicLyrics', 'lyrics']) {
+    if (isSrv3TimedText(value[key])) return { key, text: value[key] };
   }
   return null;
 };
@@ -673,7 +682,7 @@ export const normalizeLrchubLyricsResponse = (res, options = {}) => {
 
   let lyrics = '';
   let dynamicLines = null;
-  const animatedLyricsXml = [
+  const explicitAnimatedLyrics = [
     source.animated_lyrics,
     source.timedtext,
     source.timed_text,
@@ -681,6 +690,17 @@ export const normalizeLrchubLyricsResponse = (res, options = {}) => {
     source.caption_xml,
     source.captionXml
   ].find(value => typeof value === 'string' && value.trim()) || '';
+  // 古い/互換APIでは srv3 XML が DynamicLRC 用の別名や lyrics 本体へ
+  // 入ることがある。内容で判定して animated_lyrics へ正規化し、
+  // DynamicLRC parserへ誤投入されたまま描画経路を失わないようにする。
+  const aliasedSrv3Lyrics = [
+    source.dynamic_lrc,
+    source.dynamic_lyrics,
+    source.dynamicLrc,
+    source.dynamicLyrics,
+    source.lyrics,
+  ].find(isSrv3TimedText) || '';
+  const animatedLyricsXml = explicitAnimatedLyrics || aliasedSrv3Lyrics;
 
   const dynText = source.dynamic_lrc || source.dynamic_lyrics || source.dynamicLrc || source.dynamicLyrics;
   if (dynText) {

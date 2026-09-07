@@ -1738,29 +1738,20 @@ body.ytm-custom-layout.ytm-animated-caption-mode #my-lyrics-container {
   position: absolute;
   display: inline-block;
   max-width: none;
-  white-space: nowrap;
+  /* srv3 の改行を保持しつつ、自動折り返しは行わない */
+  white-space: pre;
   text-wrap: nowrap;
   word-break: keep-all;
   overflow-wrap: normal;
   font-weight: 800;
   line-height: 1.18;
   letter-spacing: 0;
-  animation: ytm-caption-pop 0.16s ease-out both;
+  /* srv3 は pen/wp を変えた短い p フレーム自身がアニメーション。
+     CSS animation は inline の opacity/transform を上書きするため付けない。 */
   will-change: opacity, transform;
 
   /* 蝓ｺ貅門ｹ� 800px 縺ｫ蟇ｾ縺吶ｋ繧ｳ繝ｳ繝�リ縺ｮ迴ｾ蝨ｨ蟷� (100cqw) 縺ｮ豈皮紫縺ｧ繝輔か繝ｳ繝医し繧､繧ｺ繧�3蛟阪↓繧ｹ繧ｱ繝ｼ繝ｫ */
   font-size: 48px;
-}
-
-@keyframes ytm-caption-pop {
-  from {
-    opacity: 0;
-    transform: scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-  }
 }
 
 .lyric-line.active {

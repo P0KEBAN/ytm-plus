@@ -907,8 +907,8 @@ const normalizeSourceMode = (value) => (
 );
 
 // いま表示している歌詞が「YTM優先」設定によって選ばれたものか。
-// true の間は、あとから届く LRCHub の高品質差し替えを受け付けない
-// (手動で候補を選んだときと同じ扱い)。
+// 通常の別ソースでは差し替えないが、アニメーション表示を有効にしている
+// ときの LRCHub srv3 は表示モードそのものなので、後着でも受け付ける。
 let currentLyricsFromPreferredYtm = false;
 // Immersion が開いていて再生位置を継続的に追えていたか。
 // 連続再生の offset 補正を適用してよいかの判断に使う。
@@ -974,22 +974,52 @@ const extractTimedTextSegments = (node, inheritedPenId = '') => {
   return segments;
 };
 
+const getTimedTextPenOpacity = (pen) => {
+  if (pen?.fo === undefined) return 1;
+  const value = Number(pen.fo);
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value / 254)) : 1;
+};
+
+const hasTimedTextVisibleEdge = (pen) => (
+  !!pen &&
+  String(pen.et || '0') !== '0' &&
+  /^#[0-9a-f]{6}$/i.test(String(pen.ec || ''))
+);
+
+const isTimedTextPenVisible = (pen) => (
+  getTimedTextPenOpacity(pen) > 0 || hasTimedTextVisibleEdge(pen)
+);
+
+const getTimedTextVisibleText = (segments, cuePenId, cuePen, pens) => {
+  if (!isTimedTextPenVisible(cuePen)) return '';
+  const normalizedCuePenId = String(cuePenId || '');
+  const visible = (Array.isArray(segments) ? segments : []).filter((segment) => {
+    const segmentPenId = String(segment?.penId || '');
+    if (!segmentPenId || segmentPenId === normalizedCuePenId) return true;
+    return isTimedTextPenVisible(pens?.get?.(segmentPenId) || {});
+  });
+  return normalizeTimedTextCaption(visible.map(segment => segment.text).join(''));
+};
+
 const buildTimedTextPlainLines = (events) => {
   const lines = [];
   const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
   events.forEach((event) => {
-    const text = normalizeTimedTextCaption(event.text);
+    const sourceText = typeof event?.visibleText === 'string' ? event.visibleText : event?.text;
+    const text = normalizeTimedTextCaption(sourceText);
     const norm = normalize(text);
     if (!norm) return;
 
     const last = lines[lines.length - 1];
     if (last && event.time <= (last.endTime || last.time) + 0.35) {
       const lastNorm = normalize(last.text);
-      if (norm === lastNorm) return;
+      if (norm === lastNorm) {
+        last.endTime = Math.max(last.endTime || last.time, event.endTime || event.time);
+        return;
+      }
       if (norm.includes(lastNorm) || lastNorm.includes(norm)) {
         if (norm.length >= lastNorm.length) {
-          last.time = event.time;
           last.endTime = event.endTime;
           last.text = text;
         }
@@ -1006,6 +1036,20 @@ const buildTimedTextPlainLines = (events) => {
 
   return lines.map(({ time, text }) => ({ time, text }));
 };
+
+// srv3 の短い <p> は、それ自体がアニメーションの1フレーム。
+// 前後に許容時間を足すと、次の位置/透明度フレームまで同時表示されて
+// 残像になるため、開始を含み終了を含まない区間で厳密に選ぶ。
+const getActiveTimedTextEvents = (events, timeMs, limit = 24) => (
+  (Array.isArray(events) ? events : [])
+    .filter(event => (
+      Number.isFinite(event?.startMs) &&
+      Number.isFinite(event?.endMs) &&
+      timeMs >= event.startMs &&
+      timeMs < event.endMs
+    ))
+    .slice(-Math.max(1, Number(limit) || 24))
+);
 
 const parseTimedTextAnimation = (xmlText) => {
   if (!isTimedTextXml(xmlText) || typeof DOMParser === 'undefined') return null;
@@ -1031,20 +1075,27 @@ const parseTimedTextAnimation = (xmlText) => {
       const segments = extractTimedTextSegments(p, penId);
       const text = normalizeTimedTextCaption(segments.map(s => s.text).join(''));
       if (!text) return;
+      const pen = pens.get(String(penId)) || {};
+      const visibleText = getTimedTextVisibleText(segments, penId, pen, pens);
+      // d が明示された srv3 の <p> は、その長さ自体がアニメーションの
+      // 1フレーム。33ms/34ms の正規フレームを60msへ延ばすと、次の
+      // フレームと重なって残像になる。欠落または0のときだけ補完する。
+      const frameDurationMs = durationMs > 0 ? durationMs : 60;
 
       events.push({
         id: index,
         time: startMs / 1000,
-        endTime: (startMs + Math.max(60, durationMs || 0)) / 1000,
+        endTime: (startMs + frameDurationMs) / 1000,
         startMs,
-        endMs: startMs + Math.max(60, durationMs || 0),
+        endMs: startMs + frameDurationMs,
         durationMs,
         text,
+        visibleText,
         segments: segments.length ? segments : [{ text, penId }],
         penId,
         wpId,
         wsId,
-        pen: pens.get(String(penId)) || {},
+        pen,
         window: windows.get(String(wpId)) || {},
         windowStyle: windowStyles.get(String(wsId)) || {},
       });
@@ -1084,14 +1135,33 @@ const getTimedTextAnchorTransform = (anchorPoint) => {
 const getTimedTextAlign = (windowStyle) => {
   const ju = Number(windowStyle?.ju);
   if (ju === 0) return 'left';
-  if (ju === 2) return 'right';
-  return 'center';
+  if (ju === 1) return 'right';
+  return 'center'; // srv3: ju=2
 };
 
 const getTimedTextScaledFontSize = (rawSize, fallback = 140) => {
   const numeric = Number(rawSize);
   const sourceSize = Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
   return Math.max(20, Math.min(98, sourceSize * 0.30));
+};
+
+const getTimedTextForegroundColor = (pen, fallback = '#FEFEFE') => {
+  const color = /^#[0-9a-f]{6}$/i.test(String(pen?.fc || '')) ? pen.fc : fallback;
+  const alpha = getTimedTextPenOpacity(pen);
+  if (alpha >= 0.999) return color;
+  const red = parseInt(color.slice(1, 3), 16);
+  const green = parseInt(color.slice(3, 5), 16);
+  const blue = parseInt(color.slice(5, 7), 16);
+  return `rgba(${red},${green},${blue},${alpha.toFixed(3)})`;
+};
+
+const getTimedTextShadow = (pen) => {
+  if (hasTimedTextVisibleEdge(pen)) {
+    return `0 0 2px ${pen.ec}, 0 2px 8px rgba(0,0,0,.72)`;
+  }
+  return getTimedTextPenOpacity(pen) > 0
+    ? '0 2px 10px rgba(0,0,0,.72)'
+    : 'none';
 };
 
 const getAnimatedCaptionFontScale = () => {
@@ -1115,12 +1185,8 @@ const getTimedTextCueStyle = (event) => {
   const scale = getAnimatedCaptionFontScale();
   const baseFontSize = getTimedTextScaledFontSize(pen.sz, 140);
   const fontSize = baseFontSize * scale;
-  const opacity = pen.fo !== undefined ? Math.max(0, Math.min(1, Number(pen.fo) / 254)) : 1;
-  const color = /^#[0-9a-f]{6}$/i.test(pen.fc || '') ? pen.fc : '#FEFEFE';
-  const edgeColor = /^#[0-9a-f]{6}$/i.test(pen.ec || '') ? pen.ec : '#000000';
-  const textShadow = pen.ec
-    ? `0 0 2px ${edgeColor}, 0 2px 8px rgba(0,0,0,.72)`
-    : '0 2px 10px rgba(0,0,0,.72)';
+  const color = getTimedTextForegroundColor(pen);
+  const textShadow = getTimedTextShadow(pen);
 
   return [
     `left:${left}%`,
@@ -1129,28 +1195,63 @@ const getTimedTextCueStyle = (event) => {
     `--ytm-animated-base-font-size:${baseFontSize}px`,
     `font-size:${fontSize}px`,
     `color:${color}`,
-    `opacity:${opacity}`,
     `text-shadow:${textShadow}`,
     `text-align:${getTimedTextAlign(event.windowStyle)}`,
     pen.i === '1' ? 'font-style:italic' : '',
   ].filter(Boolean).join(';');
 };
 
+const shouldApplyTimedTextSegmentPen = (segment, event) => {
+  const segmentPenId = String(segment?.penId || '');
+  const cuePenId = String(event?.penId || '');
+  // p の pen は親要素ですでに適用済み。同じ pen を span にも適用すると
+  // fo (opacity) が二重に掛かり、フェードフレームがほぼ見えなくなる。
+  return !!segmentPenId && segmentPenId !== cuePenId;
+};
+
 const getTimedTextSegmentHtml = (event) => (
   ((segments, scale) => segments.map(segment => {
+    if (!shouldApplyTimedTextSegmentPen(segment, event)) return escapeHtml(segment.text);
     const pen = animatedCaptionData?.pens?.get(String(segment.penId || event.penId)) || event.pen || {};
-    const color = /^#[0-9a-f]{6}$/i.test(pen.fc || '') ? pen.fc : '';
-    const opacity = pen.fo !== undefined ? Math.max(0, Math.min(1, Number(pen.fo) / 254)) : null;
+    const color = getTimedTextForegroundColor(pen, '#FEFEFE');
     const size = Number(pen.sz || 0);
     const style = [
-      color ? `color:${color}` : '',
-      opacity !== null ? `opacity:${opacity}` : '',
+      `color:${color}`,
+      `text-shadow:${getTimedTextShadow(pen)}`,
       size ? `font-size:${(getTimedTextScaledFontSize(size, size) * scale).toFixed(2)}px` : '',
       pen.i === '1' ? 'font-style:italic' : '',
     ].filter(Boolean).join(';');
     return `<span${style ? ` style="${style}"` : ''}>${escapeHtml(segment.text)}</span>`;
   }).join(''))(event.segments || [{ text: event.text, penId: event.penId }], getAnimatedCaptionFontScale())
 );
+
+const syncTimedTextStage = (stage, activeEvents) => {
+  if (!stage) return;
+  const existing = new Map(
+    Array.from(stage.children || []).map(node => [String(node.dataset?.srv3EventId || ''), node])
+  );
+  const activeIds = new Set();
+  const ownerDocument = stage.ownerDocument || document;
+
+  activeEvents.forEach((event) => {
+    const eventId = String(event.id);
+    activeIds.add(eventId);
+    let cue = existing.get(eventId);
+    if (!cue) {
+      cue = ownerDocument.createElement('div');
+      cue.className = 'ytm-animated-caption-cue';
+      cue.dataset.srv3EventId = eventId;
+      cue.style.cssText = getTimedTextCueStyle(event);
+      cue.innerHTML = getTimedTextSegmentHtml(event);
+    }
+    // appendChild は既存nodeを破棄せず、srv3の重なり順だけを揃える。
+    stage.appendChild(cue);
+  });
+
+  existing.forEach((cue, eventId) => {
+    if (!activeIds.has(eventId)) cue.remove();
+  });
+};
 
 function renderAnimatedTimedText(captionData) {
   if (!ui.lyrics || !captionData) return;
@@ -1162,24 +1263,35 @@ function renderAnimatedTimedText(captionData) {
   document.body.classList.remove('ytm-no-lyrics', 'ytm-no-timestamp');
   document.body.classList.add('ytm-has-timestamp', 'ytm-animated-caption-mode');
   ui.lyrics.innerHTML = '<div class="ytm-animated-caption-stage" aria-live="off"></div>';
+  if (PipManager.pipWindow && PipManager.pipLyricsContainer) {
+    PipManager.pipLyricsContainer.innerHTML = ui.lyrics.innerHTML;
+    const pipBody = PipManager.pipWindow.document?.body;
+    if (pipBody) {
+      pipBody.classList.remove('ytm-no-lyrics', 'ytm-no-timestamp');
+      pipBody.classList.add('ytm-animated-caption-mode');
+      pipBody.classList.toggle('ytm-keep-past-lyrics', !!config.keepPastLyrics);
+    }
+  }
   const now = getCurrentPlaybackTimeSec();
   updateAnimatedCaptionStage(typeof now === 'number' ? now : 0, true);
 }
 
 function updateAnimatedCaptionStage(currentTime, force = false) {
   if (!animatedCaptionData || !ui.lyrics) return;
-  const stage = ui.lyrics.querySelector('.ytm-animated-caption-stage');
-  if (!stage) return;
+  const stages = [ui.lyrics.querySelector('.ytm-animated-caption-stage')];
+  if (PipManager.pipWindow && PipManager.pipLyricsContainer) {
+    stages.push(PipManager.pipLyricsContainer.querySelector('.ytm-animated-caption-stage'));
+  }
+  const availableStages = stages.filter(Boolean);
+  if (!availableStages.length) return;
   const tMs = Math.max(0, currentTime * 1000);
-  const active = animatedCaptionData.events
-    .filter(event => tMs + 40 >= event.startMs && tMs <= event.endMs + 40)
-    .slice(-24);
+  const active = getActiveTimedTextEvents(animatedCaptionData.events, tMs);
   const key = active.map(event => `${event.id}:${event.startMs}:${event.endMs}`).join('|');
   if (!force && key === animatedCaptionFrameKey) return;
   animatedCaptionFrameKey = key;
-  stage.innerHTML = active.map(event => (
-    `<div class="ytm-animated-caption-cue" style="${getTimedTextCueStyle(event)}">${getTimedTextSegmentHtml(event)}</div>`
-  )).join('');
+  availableStages.forEach(stage => {
+    syncTimedTextStage(stage, active);
+  });
 }
 
 function setupMovieMode() {
@@ -1814,10 +1926,20 @@ chrome.runtime.onMessage.addListener((msg) => {
 
     // dynamic: char-timed lines can arrive later even if lyrics came from API
     if (Array.isArray(p.dynamicLines) && p.dynamicLines.length) {
-      dynamicLines = p.dynamicLines;
-      // re-render to attach per-char spans while keeping current lines/translations
-      if (Array.isArray(lyricsData) && lyricsData.length) {
-        renderLyrics(lyricsData);
+      const keepAnimatedStage = !!(
+        config.useAnimatedCaptions &&
+        animatedCaptionData &&
+        document.body.classList.contains('ytm-animated-caption-mode')
+      );
+      // srv3 is the selected top-level display mode. A late DynamicLRC metadata
+      // packet is an alternative representation, not permission to tear down
+      // the animated stage and restore ordinary lyric rows.
+      if (!keepAnimatedStage) {
+        dynamicLines = p.dynamicLines;
+        // re-render to attach per-char spans while keeping current lines/translations
+        if (Array.isArray(lyricsData) && lyricsData.length) {
+          renderLyrics(lyricsData);
+        }
       }
     }
 
@@ -1927,13 +2049,21 @@ const hasCharacterSyncedLines = (value) => (
 const selectLyricsPayload = (payload) => {
   const lyrics = typeof payload?.lyrics === 'string' ? payload.lyrics : '';
   const animatedLyrics = typeof payload?.animated_lyrics === 'string' ? payload.animated_lyrics : '';
-  const nextDynamicLines = hasCharacterSyncedLines(payload?.dynamicLines)
+  const availableDynamicLines = hasCharacterSyncedLines(payload?.dynamicLines)
     ? payload.dynamicLines
     : null;
-  const useAnimated = !nextDynamicLines && config.useAnimatedCaptions && animatedLyrics.trim();
-  const quality = nextDynamicLines
+  // 「アニメーション歌詞」は LRCHub の srv3 (animated_lyrics)。設定が ON の
+  // ときは同じレコードに DynamicLRC があっても srv3 を明示的に選ぶ。
+  const useAnimated = !!config.useAnimatedCaptions && !!animatedLyrics.trim();
+  const nextDynamicLines = useAnimated ? null : availableDynamicLines;
+  const mode = useAnimated
+    ? 'animated'
+    : (nextDynamicLines
+      ? 'dynamic'
+      : (/\[\d+:\d{2}(?:[.:]\d{1,3})?\]/.test(lyrics) ? 'synced' : (lyrics.trim() ? 'plain' : 'none')));
+  const quality = useAnimated
     ? 4
-    : (useAnimated
+    : (nextDynamicLines
       ? 3
       : (/\[\d+:\d{2}(?:[.:]\d{1,3})?\]/.test(lyrics) ? 2 : (lyrics.trim() ? 1 : 0)));
   return {
@@ -1941,6 +2071,7 @@ const selectLyricsPayload = (payload) => {
     lyrics,
     animatedLyrics,
     dynamicLines: nextDynamicLines,
+    mode,
     quality,
   };
 };
@@ -1956,14 +2087,16 @@ async function applyLateLyricsUpgrade(payload) {
   // A manual candidate choice is an explicit user decision; never replace it
   // with a request that started before that choice.
   if (selectedCandidateId || currentLyricsResultPriority >= 3) return;
-  // YTM優先で選ばれた歌詞は、ユーザーの明示的な選択と同じ扱い。
-  // 再生中に LRCHub が割り込んで差し替えるのを防ぐ。
-  // typeof で見ているのは、この関数がテストで単体切り出しされ、
-  // 外側の変数が存在しない文脈で実行されることがあるため。
-  if (typeof currentLyricsFromPreferredYtm !== 'undefined' && currentLyricsFromPreferredYtm) return;
-
   const selected = selectLyricsPayload(payload);
   if (!selected.text || !selected.text.trim()) return;
+  // YTM優先で選ばれた通常歌詞へ別ソースを割り込ませない。ただし設定で
+  // 要求された srv3 は通常の行同期とは異なる表示モードなので差し替える。
+  // typeof は、この関数を単体切り出しするテスト環境向け。
+  if (
+    typeof currentLyricsFromPreferredYtm !== 'undefined' &&
+    currentLyricsFromPreferredYtm &&
+    selected.mode !== 'animated'
+  ) return;
   if (currentLyricsResultPriority === 2 && selected.quality <= currentLyricsQuality) return;
   const requestId = activeLyricsRequestId;
   const targetKey = currentKey;
@@ -3318,14 +3451,19 @@ async function applyLyricsText(rawLyrics) {
       const canonicalSingerLines = canonicalLyrics.trim()
         ? parseLRCInternal(canonicalLyrics).lines
         : [];
-      const useSingerLayout = hasSingerDisplayMetadata(currentSingerMetadata, canonicalSingerLines);
-      if (
-        useSingerLayout &&
-        canonicalLyrics.trim() && canonicalLyrics.trim() !== rawLyrics.trim()
-      ) {
-        return applyLyricsText(canonicalLyrics);
-      }
-      lyricsData = timedTextData.plainLines || [];
+      // 歌手メタデータはsrv3とは別APIから遅れて到着する。以前はその時点で
+      // canonical LRCへ描画を切り替えていたため、Animated TimedTextが一瞬だけ
+      // 表示されて通常歌詞へ戻っていた。自由配置のsrv3を表示ソースとして維持し、
+      // 行メタデータだけをplainLinesへ対応付ける。
+      lyricsData = applySingerMetadataToLines(
+        timedTextData.plainLines || [],
+        currentSingerMetadata,
+        {
+          canonicalLines: canonicalSingerLines,
+          sameSource: !canonicalLyrics.trim() || canonicalLyrics.trim() === rawLyrics.trim(),
+        }
+      );
+      timedTextData.plainLines = lyricsData;
       dynamicLines = null;
       duetSubDynamicLines = null;
       renderAnimatedTimedText(timedTextData);
@@ -3472,28 +3610,29 @@ const safeRuntimeSendMessage = (message) => {
 const refreshRenderedSingerMetadata = async () => {
   const canonicalLyrics = String(currentSingerCanonicalLyrics || '');
   const renderedLyrics = String(lastRawLyricsText || '');
-  const canonicalSingerLines = canonicalLyrics.trim()
+  const canonicalLines = canonicalLyrics.trim()
     ? parseLRCInternal(canonicalLyrics).lines
     : [];
-  const useSingerLayout = hasSingerDisplayMetadata(currentSingerMetadata, canonicalSingerLines);
 
-  // Animated captions have their own free-positioned cue layout. When singer
-  // metadata changes alignment, color, or labels, use the canonical line
-  // layout so that contract remains visible and deterministic.
+  // Animated captions own their free-positioned stage. Singer metadata arrives
+  // asynchronously, so update only the semantic line mapping and leave that
+  // stage intact; renderLyrics() would remove ytm-animated-caption-mode.
   if (
-    useSingerLayout &&
-    canonicalLyrics.trim() && renderedLyrics.trim() &&
-    canonicalLyrics.trim() !== renderedLyrics.trim() &&
+    animatedCaptionData &&
     document.body.classList.contains('ytm-animated-caption-mode')
   ) {
-    await applyLyricsText(canonicalLyrics);
+    const animatedLines = Array.isArray(animatedCaptionData.plainLines)
+      ? animatedCaptionData.plainLines
+      : (Array.isArray(lyricsData) ? lyricsData : []);
+    lyricsData = applySingerMetadataToLines(animatedLines, currentSingerMetadata, {
+      canonicalLines,
+      sameSource: !canonicalLyrics.trim() || canonicalLyrics.trim() === renderedLyrics.trim(),
+    });
+    animatedCaptionData.plainLines = lyricsData;
     return;
   }
 
   if (!Array.isArray(lyricsData) || !lyricsData.length) return;
-  const canonicalLines = canonicalLyrics.trim()
-    ? parseLRCInternal(canonicalLyrics).lines
-    : [];
   const sameSource = !canonicalLyrics.trim() || canonicalLyrics.trim() === renderedLyrics.trim();
   lyricsData = applySingerMetadataToLines(lyricsData, currentSingerMetadata, {
     canonicalLines,
@@ -3607,11 +3746,13 @@ const getCurrentPlaybackLyricText = () => {
     Array.isArray(animatedCaptionData.events)
   ) {
     const tMs = Math.max(0, currentTime * 1000);
-    const activeEvents = animatedCaptionData.events
-      .filter(event => tMs + 40 >= event.startMs && tMs <= event.endMs + 40)
-      .slice(-24);
-    const currentEvent = activeEvents[activeEvents.length - 1];
-    return currentEvent ? String(currentEvent.text || '').trim() : '';
+    const activeEvents = getActiveTimedTextEvents(animatedCaptionData.events, tMs);
+    return activeEvents
+      .map(event => String(
+        typeof event?.visibleText === 'string' ? event.visibleText : event?.text || ''
+      ).trim())
+      .filter((text, index, values) => text && values.indexOf(text) === index)
+      .join(' / ');
   }
 
   if (!Array.isArray(lyricsData) || !lyricsData.length || !hasTimestamp) return null;
@@ -3625,9 +3766,15 @@ const getCurrentPlaybackLyricText = () => {
   }
   if (primaryIndex < 0) return '';
 
-  const activeIndices = new Set([primaryIndex]);
+  const primaryLine = lyricsData[primaryIndex];
+  const primaryHasDynamicRange = Number.isFinite(primaryLine?._dynamicRenderStartSec) &&
+    Number.isFinite(primaryLine?._dynamicRenderEndSec);
+  const primaryIsActive = !primaryHasDynamicRange ||
+    isLineDynamicallyActiveAtTime(primaryLine, currentTime);
+  const activeIndices = new Set();
+  if (primaryIsActive) activeIndices.add(primaryIndex);
   const currentLineTime = lyricsData[primaryIndex]?.time;
-  if (typeof currentLineTime === 'number') {
+  if (primaryIsActive && typeof currentLineTime === 'number') {
     for (let i = primaryIndex - 1; i >= 0; i--) {
       if (!isSameTimestamp(lyricsData[i]?.time, currentLineTime)) break;
       activeIndices.add(i);
@@ -3638,7 +3785,7 @@ const getCurrentPlaybackLyricText = () => {
     }
   }
 
-  if (activeIndices.size === 1 && primaryIndex > 0) {
+  if (primaryIsActive && activeIndices.size === 1 && primaryIndex > 0) {
     const previousIndex = primaryIndex - 1;
     const previousTime = lyricsData[previousIndex]?.time;
     const currentSide = lyricsData[primaryIndex]?.duetSide;
@@ -5015,6 +5162,7 @@ function renderSettingsPanel() {
     document.body.classList.toggle('ytm-lightweight-mode', !!config.lowCpuMode);
     document.body.classList.toggle('ytm-singer-colors-enabled', !!config.useSingerColors);
     if (PipManager.pipWindow?.document) {
+      PipManager.pipWindow.document.body.classList.toggle('ytm-keep-past-lyrics', !!config.keepPastLyrics);
       PipManager.pipWindow.document.body.classList.toggle('ytm-singer-colors-enabled', !!config.useSingerColors);
     }
     document.documentElement.style.setProperty('--ytm-lyric-weight', config.lyricWeight);
@@ -5754,8 +5902,8 @@ async function loadLyrics(meta, options = {}) {
       : await backgroundPromise;
 
     if (skipWaitingBackground && res === null) {
-      // 間に合わなかった分は、届いた時にメタデータだけ反映する。
-      // 歌詞そのものは YTM を採用済みなので触らない。
+      // 間に合わなかった分のメタデータを反映する。通常歌詞は YTM を
+      // 維持するが、アニメーション表示が有効な srv3 は後着でも差し替える。
       const metaKey = thisKey, metaVideoId = video_id, metaRequestId = requestId;
       backgroundPromise.then(late => {
         if (!late || !late.success) return;
@@ -5776,6 +5924,11 @@ async function loadLyrics(meta, options = {}) {
         refreshCandidateMenu();
         refreshLockMenu();
         refreshMeaningUi();
+        if (selectLyricsPayload(late).mode === 'animated') {
+          void applyLateLyricsUpgrade(late).catch((error) => {
+            console.warn('[YTM] Failed to apply late srv3 lyrics:', error);
+          });
+        }
       }).catch(() => { });
     }
     if (
@@ -5791,8 +5944,9 @@ async function loadLyrics(meta, options = {}) {
     // 品質スコアによる自動判定はしない。設定した側が確実に優先される方が予測しやすい。
     try {
       const preferYtm = preferYtmSource;
-      const backgroundHasLyrics = !!res?.success &&
-        typeof res.lyrics === 'string' && !!res.lyrics.trim();
+      const backgroundSelection = selectLyricsPayload(res);
+      const backgroundHasLyrics = !!res?.success && !!backgroundSelection.text.trim();
+      const backgroundHasSrv3 = backgroundHasLyrics && backgroundSelection.mode === 'animated';
 
       // LRCHub優先で、しかも LRCHub 側が既に歌詞を返しているなら YTM の結果は使わない。
       // ここで待つと、表示が YTM の完了まで丸ごと遅れてしまう
@@ -5811,7 +5965,7 @@ async function loadLyrics(meta, options = {}) {
         // ときの最後の受け皿として採用する。
         const ytmHasPlain = !!(ytmRes && !ytmRes.hasSynced &&
           typeof ytmRes.lyrics === 'string' && ytmRes.lyrics.trim());
-        const useYtm = !!ytmRes && stillCurrent &&
+        const useYtm = !!ytmRes && stillCurrent && !backgroundHasSrv3 &&
           (ytmRes.hasSynced || (ytmHasPlain && !backgroundHasLyrics));
 
         if (useYtm) {
@@ -6229,6 +6383,8 @@ function renderLyrics(data) {
       // 歌詞が無い曲は PIP でも歌詞エリアごと畳む（通常ウィンドウと同じ扱い）
       PipManager.pipWindow.document.body.classList.toggle('ytm-no-lyrics', !hasData);
       PipManager.pipWindow.document.body.classList.toggle('ytm-no-timestamp', !hasTimestamp);
+      PipManager.pipWindow.document.body.classList.remove('ytm-animated-caption-mode');
+      PipManager.pipWindow.document.body.classList.toggle('ytm-keep-past-lyrics', !!config.keepPastLyrics);
       PipManager.pipWindow.document.body.classList.toggle('ytm-singer-colors-enabled', !!config.useSingerColors);
     }
   }
@@ -6439,10 +6595,14 @@ function updateLyricHighlight(currentTime) {
 
   const activeIndices = new Set();
   if (idx >= 0 && idx < lyricsData.length) {
-    activeIndices.add(idx);
+    const primaryLine = lyricsData[idx];
+    const primaryHasDynamicRange = Number.isFinite(primaryLine?._dynamicRenderStartSec) &&
+      Number.isFinite(primaryLine?._dynamicRenderEndSec);
+    const primaryIsActive = !primaryHasDynamicRange || isLineDynamicallyActiveAtTime(primaryLine, t);
+    if (primaryIsActive) activeIndices.add(idx);
 
     const currentLineTime = lyricsData[idx]?.time;
-    if (typeof currentLineTime === 'number') {
+    if (primaryIsActive && typeof currentLineTime === 'number') {
       for (let i = idx - 1; i >= 0; i--) {
         if (!isSameTimestamp(lyricsData[i]?.time, currentLineTime)) break;
         activeIndices.add(i);
@@ -6453,7 +6613,7 @@ function updateLyricHighlight(currentTime) {
       }
     }
 
-    if (activeIndices.size === 1) {
+    if (primaryIsActive && activeIndices.size === 1) {
       const prevIdx = (idx > 0 && idx < lyricsData.length &&
         typeof lyricsData[idx]?.time === 'number' &&
         typeof lyricsData[idx - 1]?.time === 'number' &&
@@ -6540,7 +6700,12 @@ function updateLyricHighlight(currentTime) {
       if (!r.classList.contains('lyric-line')) continue;
       const isActive = activeIndices.has(i);
       const isPrimary = (i === idx);
-      const isPast = idx >= 0 && i < idx && !isActive;
+      const dynamicEndSec = Number.isFinite(lyricsData[i]?._dynamicRenderEndSec)
+        ? lyricsData[i]._dynamicRenderEndSec
+        : null;
+      const primaryDynamicEnded = i === idx && dynamicEndSec !== null &&
+        t > (dynamicEndSec + DYNAMIC_OVERLAP_TOLERANCE);
+      const isPast = idx >= 0 && !isActive && (i < idx || primaryDynamicEnded);
       r.classList.toggle('lyric-past', isPast);
 
       if (isActive) {
