@@ -39,6 +39,12 @@ h1 { font-size: 45px; font-weight: 500; line-height: 1.15; margin-left: -4px; ov
 .icon { display: flex; align-items: center; justify-content: center; padding: 0; position: absolute; filter: drop-shadow(0 1px 15px rgb(0 0 0 / .1)); transition: opacity .15s, transform .15s; }
 .icon:hover { opacity: .8; }
 .icon:active { transform: scale(.94); }
+/* できない操作は見た目でも分かるようにする。契約（types.js の Capabilities）は
+   「押しても何も起きないボタンを黙って出さない」ことを求めているが、disabled 属性だけでは
+   目で見て区別がつかず、マウス利用者には無効化されたことが伝わらない。 */
+button:disabled, input:disabled { opacity: .35; }
+.icon:disabled:hover { opacity: .35; }
+.icon:disabled:active { transform: none; }
 .glyph { display: block; color: #fff; fill: currentColor; stroke: none; overflow: visible; }
 .glyph[hidden] { display: none; }
 .glyph.solid { stroke: currentColor; stroke-width: 2.1; stroke-linejoin: round; }

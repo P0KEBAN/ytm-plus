@@ -59,6 +59,19 @@ export const TRANSLATION_STATUS = Object.freeze(['idle', 'loading', 'ready', 'er
 export const QUEUE_STATUS = Object.freeze(['idle', 'loading', 'ready', 'error']);
 
 /**
+ * 評価（いいね／低評価）。3状態である。
+ *
+ * PiP には以前から評価の表示と操作があり、YouTube Music の DOM を直接クリックしていた
+ * （`src/js/module/pip-manager.js`、ROADMAP 4c #1）。Phase 6c でそれを Adapter の内側へ
+ * 移すと決めているのに、Phase 6a の契約には評価がどこにも無く、**移し先が存在しなかった**
+ * （2026-09-07 Codex レビュー 高2）。
+ *
+ * 契約の方針どおり `toggleLike()` ではなく**目標値指定**（`setLikeStatus`）にしてある。
+ * YouTube Music 側の実体はトグルなので、その変換は Adapter の内側でやる（§3.6 と同じ）。
+ */
+export const LIKE_STATUSES = Object.freeze(['none', 'like', 'dislike']);
+
+/**
  * 操作が失敗した理由。
  *   unsupported … この環境ではその操作ができない（capabilities が false）
  *   not-found   … 対象が見つからない（消えたキュー項目など）
@@ -81,22 +94,42 @@ export const VOLUME_MAX = 100;
  * @typedef {'idle'|'loading'|'ready'|'error'} TranslationStatus
  * @typedef {'idle'|'loading'|'ready'|'error'} QueueStatus
  * @typedef {'unsupported'|'not-found'|'timeout'|'rejected'} OpFailure
+ * @typedef {'none'|'like'|'dislike'} LikeStatus
  */
 
 /**
- * 曲の参照。
+ * 曲の参照。**「いま鳴っている曲そのもの」だけを表す。**
  *
- * **itemId と videoId を分けているのは意図的である。**
- * 同じ曲がキューに2回入っていることがあるので、videoId だけでは
- * 「どちらの項目が現在曲か」を表せない。
- *   - itemId  … キュー内の「この項目」を指す。選曲に使う
- *   - videoId … 曲そのもの。歌詞取得のキーに使う
+ * **キュー所属（itemId）はここに持たせない。** 正本は `QueueSnapshot.currentItemId` である。
+ * TrackRef が itemId を必須で持っていると、次の状態を型で表現できなかった
+ * （2026-09-07 Codex レビュー 高1）。
+ *
+ *   - 曲は特定できたが、キューはまだ取得中
+ *   - MAIN world のブリッジが落ちて `capabilities.queue === false`
+ *   - 再生中の項目が、取得済みキューにまだ現れていない
+ *
+ * このとき架空の itemId を作るか、取れている曲情報ごと `track: null` にするしかなく、
+ * 後者では曲名・再生・歌詞まで不必要に消える。**曲とキュー所属は別の関心である。**
+ *
+ *   - instanceId … 「この再生」を指す。曲変更の検知に使う
+ *   - videoId    … 曲そのもの。歌詞取得のキーに使う
+ *   - キュー所属  … `queue.currentItemId`。取れないときは null
+ *
+ * ### instanceId とは何か
+ *
+ * **Adapter が「曲の再生を新しく開始した」と判断するたびに変わる不透明な値**である。
+ * UI は等値比較しかしない。次送り・前送り・選曲・自動送り・リピートONEの折り返しで変わる。
+ *
+ * これをキュー項目IDと分けているのには実利がある。Phase 6b の実測でキューに安定IDが
+ * 無いと分かった場合、`videoId#index` の合成IDへ落とすことになるが、そのIDは
+ * **並べ替えのたびに変わる。** 曲変更の検知をそれに乗せていると、曲は変わっていないのに
+ * UI が「曲が変わった」と誤認して追従や読み上げをやり直す。instanceId ならその影響を受けない。
  *
  * 配列インデックス（旧 trackIndex）は使わない。実キューは挿入・削除・
  * 並べ替えがあるので、位置は次の瞬間には別の曲を指す（SPEC.md §7 の指摘2）。
  *
  * @typedef {object} TrackRef
- * @property {string} itemId
+ * @property {string} instanceId  この再生を指す不透明な値。曲変更の検知に使う
  * @property {string} videoId
  * @property {string} title
  * @property {string} artist
@@ -144,6 +177,7 @@ export const VOLUME_MAX = 100;
  * @property {boolean} queue
  * @property {boolean} lyrics
  * @property {boolean} translation
+ * @property {boolean} like             評価の読み取りと操作ができるか
  * @property {boolean} detectBuffering  buffering を区別できるか。false なら status に buffering が現れない
  */
 
@@ -161,6 +195,7 @@ export const VOLUME_MAX = 100;
  * @property {boolean} volume     setVolume / setMuted
  * @property {boolean} repeat
  * @property {boolean} shuffle
+ * @property {boolean} like
  */
 
 /**
@@ -172,6 +207,7 @@ export const VOLUME_MAX = 100;
  * @property {boolean} muted
  * @property {RepeatMode} repeat
  * @property {boolean} shuffle
+ * @property {LikeStatus} likeStatus
  * @property {Capabilities} capabilities
  * @property {PendingOps} pending
  */
@@ -188,10 +224,16 @@ export const VOLUME_MAX = 100;
 /**
  * キュー。`Track[]` と `trackIndex` の組は使わない（SPEC.md §7 の指摘1・2）。
  *
+ * **`currentItemId` が「現在曲がキューのどの項目か」の唯一の正本である。**
+ * `TrackRef` 側には持たせない（TrackRef の説明を参照）。
+ * キューが取得中・取得できない・現在曲がまだキューに現れていないときは null になる。
+ * **null は異常ではなく正常な状態**であり、そのあいだ UI はキューの現在行を
+ * 強調しないだけで、曲名・再生・歌詞はふつうに出せる。
+ *
  * @typedef {object} QueueSnapshot
  * @property {QueueStatus} status
  * @property {QueueItem[]} items
- * @property {string|null} currentItemId
+ * @property {string|null} currentItemId  取得できていなければ null
  * @property {string|null} error
  */
 
@@ -296,6 +338,7 @@ export const VOLUME_MAX = 100;
  * @property {(muted: boolean) => Promise<OpResult>} setMuted
  * @property {(mode: RepeatMode) => Promise<OpResult>} setRepeat
  * @property {(enabled: boolean) => Promise<OpResult>} setShuffle
+ * @property {(status: LikeStatus) => Promise<OpResult>} setLikeStatus
  * @property {(enabled: boolean) => Promise<OpResult>} setTranslationWanted
  * @property {() => Promise<OpResult>} reloadLyrics
  * @property {() => void} destroy
@@ -305,7 +348,7 @@ export const VOLUME_MAX = 100;
 export const ADAPTER_METHODS = Object.freeze([
   'subscribe', 'getState', 'getPosition',
   'play', 'pause', 'seek', 'next', 'previous', 'selectQueueItem',
-  'setVolume', 'setMuted', 'setRepeat', 'setShuffle',
+  'setVolume', 'setMuted', 'setRepeat', 'setShuffle', 'setLikeStatus',
   'setTranslationWanted', 'reloadLyrics', 'destroy',
 ]);
 
@@ -329,16 +372,38 @@ export const clampVolume = (value) => {
 /** @returns {value is RepeatMode} */
 export const isRepeatMode = (value) => REPEAT_MODES.includes(value);
 
+/** @returns {value is LikeStatus} */
+export const isLikeStatus = (value) => LIKE_STATUSES.includes(value);
+
+/**
+ * スナップショットを**深く**凍結する。
+ *
+ * 浅い `Object.freeze` だと、入れ子（`track.palette.ui` など）は書き換えられてしまう。
+ * 実際に `state.player.track.palette.ui.primary` を書き換えられ、その値が
+ * `getState()` に残ることを確認した（2026-09-07 Codex レビュー 低1）。
+ * **UI が状態を書き換えられないという約束は、入れ子まで届いて初めて成り立つ。**
+ *
+ * 「凍結済みなら降りない」判定にしないこと。外側だけ `Object.freeze` した木を渡されたとき、
+ * 入れ子を素通りしてしまう。訪問済み集合で二重処理と循環を防ぐ。
+ */
+export const deepFreeze = (value, seen = new WeakSet()) => {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  Object.freeze(value);
+  for (const key of Object.keys(value)) deepFreeze(value[key], seen);
+  return value;
+};
+
 /** 既定の capabilities。実装が個別に上書きする。 */
 export const createCapabilities = (overrides = {}) => Object.freeze({
   seek: true, volume: true, repeat: true, shuffle: true,
-  queue: true, lyrics: true, translation: true, detectBuffering: true,
+  queue: true, lyrics: true, translation: true, like: true, detectBuffering: true,
   ...overrides,
 });
 
 /** 応答待ちなしの pending。 */
 export const createPendingOps = (overrides = {}) => Object.freeze({
-  transport: false, seek: false, volume: false, repeat: false, shuffle: false,
+  transport: false, seek: false, volume: false, repeat: false, shuffle: false, like: false,
   ...overrides,
 });
 
@@ -353,6 +418,7 @@ export const createEmptyPlayerSnapshot = () => Object.freeze({
   muted: false,
   repeat: 'NONE',
   shuffle: false,
+  likeStatus: 'none',
   capabilities: createCapabilities(),
   pending: createPendingOps(),
 });

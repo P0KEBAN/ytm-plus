@@ -63,11 +63,20 @@ function withProbe(target) {
 // **歌詞・翻訳の取得遅延は capture では止めない。** 初期表示は applyScenario が
 // 終端状態を直接置くので取得中を経由せず、スクリーンショットは決定的なままである。
 // 一方この遅延を 0 にすると、「再試行すると取得中を経由する」ことを検証できなくなる。
+// ?caps=repeat,volume … その capability を false にした画面を確認する。
+//   契約 §3.8 の「できないことはボタンを無効化する」を実際に目で見るための窓。
+// ?fail=timeout   … すべての操作を失敗させる。失敗表示を確認するための窓。
+// どちらも確認用であり、実機の Adapter には存在しない。
+const disabledCapabilities = Object.fromEntries(
+  (params.get('caps') || '').split(',').filter(Boolean).map(key => [key, false]),
+);
 const adapter = withProbe(createMockAdapter({
   fixtures: FIXTURES,
   autoAdvance: !capture,
   lyricsDelayMs: 650,
   translationDelayMs: 400,
+  capabilities: disabledCapabilities,
+  opFailure: params.get('fail') || null,
 }));
 
 /** 直近のスナップショット。**UI はこれを書き換えない（凍結されている）。** */
@@ -92,6 +101,8 @@ const uiState = {
   seeking: false,              // シークバーをドラッグ中
   seekPreview: null,           // ドラッグ中に見せている値
   volumeDragging: false,
+  opError: '',                 // 直近の操作が失敗したときに出す文言
+  pendingLyricsFocus: false,   // 歌詞の再取得後にフォーカスを歌詞へ戻すか
 };
 
 /* ------------------------------------------------------------------ *
@@ -108,9 +119,18 @@ const viewport = $('lyric-viewport');
 
 const announce = text => { $('announcement').textContent = text; };
 
-/** 前回の描画で使った値。作り直しが必要かを判断するためだけに持つ。 */
+/**
+ * 前回の描画で使った値。作り直しが必要かを判断するためだけに持つ。
+ *
+ * **キーには「表示に使う内容」まで入れる。** ID だけを見ていると、
+ * 同じ曲IDのままタイトルやジャケットが後から届いた場合に描き直せない。
+ * 実機では曲を検知した直後にメタデータや歌詞ソースが遅れて届くので、
+ * これは実際に起こりうる（2026-09-07 Codex レビュー 中5）。
+ */
 const rendered = {
-  trackItemId: null,
+  trackInstanceId: null,
+  videoId: null,
+  trackKey: null,
   paletteKey: null,
   lyricsKey: null,
   translationKey: null,
@@ -119,6 +139,92 @@ const rendered = {
   shuffle: null,
   status: null,
 };
+
+/** キーを組み立てるときの区切り。曲名やアーティスト名に現れない文字を使う。 */
+const SEP = '\u0001';
+
+/* ------------------------------------------------------------------ *
+ * 操作の実行係
+ *
+ * ここを1本にまとめている理由は2つある（2026-09-07 Codex レビュー 中3・中6）。
+ *
+ * **1. 応答待ち中の連打で操作が失われないようにする。**
+ * UI は目標値を「直近に Adapter から受け取った値」から計算する。応答が返る前に
+ * もう一度押されると、まだ古い値から計算してしまう。実際にリピートを2回押すと
+ * `setRepeat('ALL')` が2回出て `ONE` へ進まなかった。
+ * そこで**押された意図を関数のまま覚えておき、確定してから計算し直して発行する。**
+ * ボタンは押せるままなので、`disabled` にしたときのようにフォーカスが body へ落ちない。
+ *
+ * **2. 失敗を捨てない。**
+ * 操作はすべて `Promise<OpResult>` を返す。以前はそれを全部捨てていたので、
+ * `timeout` や `rejected` が返っても利用者には何も伝わらなかった。
+ * ------------------------------------------------------------------ */
+
+/** 応答待ちの操作キー。 */
+const inFlight = new Set();
+/** キー → 待たされている意図の列。 */
+const waiting = new Map();
+/** 連打で無限に積まないための上限。 */
+const WAITING_LIMIT = 4;
+
+const OP_FAILURE_TEXT = {
+  unsupported: 'この環境では実行できません',
+  'not-found': '対象が見つかりませんでした',
+  timeout: '応答がありませんでした',
+  rejected: '実行できませんでした',
+};
+
+/**
+ * 操作を1件実行する。
+ *
+ * @param {string} key      同時に走らせない単位。同じキーの操作は直列化される
+ * @param {object} options
+ * @param {string} options.label     失敗を伝えるときの日本語（例: 'リピートの変更'）
+ * @param {'latest'|'sequence'} [options.policy]
+ *   latest   … 目標値を指定する操作。待たされたぶんは最後の1件だけ残す
+ *   sequence … 回数に意味がある操作（曲送り）。押した回数ぶん順に実行する
+ * @param {() => Promise<import('../../src/js/newui/adapter/types.js').OpResult>} produce
+ *   **呼ばれた時点の `latest` から目標値を計算すること。** 事前に計算しない
+ * @param {(reason: string) => void} [onFailure]  失敗したときに UI 側で戻す処理
+ */
+function runAction(key, { label, policy = 'latest' }, produce, onFailure) {
+  const entry = { label, policy, produce, onFailure };
+  if (inFlight.has(key)) {
+    const list = waiting.get(key) || [];
+    waiting.set(key, policy === 'latest' ? [entry] : [...list, entry].slice(-WAITING_LIMIT));
+    return;
+  }
+  inFlight.add(key);
+  Promise.resolve()
+    .then(() => entry.produce())
+    .then((result) => {
+      if (result && result.ok === false) failAction(entry, result.reason);
+      else clearOpError();
+    })
+    // 契約では失敗は戻り値だが、実装が投げてきたときも UI は黙って壊れない。
+    .catch(() => failAction(entry, 'rejected'))
+    .finally(() => {
+      inFlight.delete(key);
+      const list = waiting.get(key);
+      if (!list || !list.length) return;
+      const [next, ...rest] = list;
+      if (rest.length) waiting.set(key, rest); else waiting.delete(key);
+      runAction(key, next, next.produce, next.onFailure);
+    });
+}
+
+function failAction(entry, reason) {
+  if (entry.onFailure) entry.onFailure(reason);
+  // #playback-message は role="status" なので、書き込めば読み上げにも乗る。
+  uiState.opError = `${entry.label}に失敗しました。${OP_FAILURE_TEXT[reason] || ''}`;
+  renderTransport();
+}
+
+function clearOpError() {
+  if (!uiState.opError) return;
+  uiState.opError = '';
+  renderTransport();
+}
 
 /* ------------------------------------------------------------------ *
  * 配色
@@ -188,7 +294,7 @@ function rebuildLines() {
     // 行IDを秒へ解決するのは UI の仕事。Adapter に seekToLyricLine は無い。
     button.addEventListener('click', () => {
       uiState.follow = true;
-      adapter.seek(line.at);
+      runAction('seek', { label: 'この行へ移動' }, () => adapter.seek(line.at));
     });
     button.addEventListener('focus', manualFollow);
     fragment.append(button);
@@ -260,6 +366,13 @@ function renderTrack() {
 
 function renderQueue() {
   const { items, currentItemId } = latest.queue;
+  // **再描画でフォーカスを body へ落とさない。**
+  // キュー項目を選ぶと currentItemId が変わり、ここが全ボタンを差し替える。
+  // 差し替え前にどの項目にフォーカスがあったかを覚えておき、あとで戻す
+  // （2026-09-07 Codex レビュー 中4。実ブラウザで body に落ちることを確認した）。
+  const active = document.activeElement;
+  const focusedItemId = active && active.classList && active.classList.contains('queue-item')
+    ? active.dataset.itemId : null;
   $('queue-items').replaceChildren(...items.map((item) => {
     const button = document.createElement('button');
     button.className = 'queue-item';
@@ -271,9 +384,19 @@ function renderQueue() {
     artist.textContent = `${item.itemId === currentItemId ? '再生中 · ' : ''}${item.artist}`;
     button.append(title, artist);
     // 配列インデックスではなく安定ID で選曲する。
-    button.onclick = () => adapter.selectQueueItem(item.itemId);
+    button.onclick = () => runAction(
+      'select', { label: 'この曲の再生' },
+      () => adapter.selectQueueItem(item.itemId),
+    );
     return button;
   }));
+  if (!focusedItemId) return;
+  const container = $('queue-items');
+  // 選んだ項目が消えていたら現在曲の行へ、それも無ければ先頭へ寄せる。
+  const restored = container.querySelector(`[data-item-id="${CSS.escape(focusedItemId)}"]`)
+    || container.querySelector('[aria-current="true"]')
+    || container.querySelector('button');
+  if (restored) restored.focus();
 }
 
 function renderTransport() {
@@ -288,7 +411,9 @@ function renderTransport() {
   $('pause-icon').toggleAttribute('hidden', status !== 'playing');
   $('play-icon').toggleAttribute('hidden', !stopped);
   $('spinner').hidden = status !== 'buffering';
-  $('playback-message').textContent = status === 'buffering' ? '読み込み中…' : '';
+  // 操作の失敗は読み込み中より優先して出す。role="status" なので読み上げにも乗る。
+  $('playback-message').textContent = uiState.opError
+    || (status === 'buffering' ? '読み込み中…' : '');
 
   $('shuffle').setAttribute('aria-pressed', String(shuffle));
   $('shuffle').disabled = !capabilities.shuffle;
@@ -361,26 +486,40 @@ function onState(state) {
   latest = state;
 
   const { track } = state.player;
+  // ID だけでなく**表示に使う内容**をキーに入れる。同じ曲のままタイトルや
+  // ジャケットが後から届いても描き直せるようにするため。
+  const trackKey = track
+    ? [track.instanceId, track.videoId, track.title, track.artist, track.album, track.artworkUrl].join(SEP)
+    : '';
   const paletteKey = track ? JSON.stringify(track.palette) : null;
   const lyricsKey = lyricsAreCurrent()
-    ? `${state.lyrics.videoId}|${state.lyrics.status}|${state.lyrics.lines.map(l => l.id).join(',')}`
+    ? [state.lyrics.videoId, state.lyrics.status,
+      state.lyrics.lines.map(l => `${l.id}@${l.at}:${l.text}`).join(SEP)].join('|')
     : `pending:${track ? track.videoId : ''}`;
-  const translationKey = `${uiState.translationVisible}|${state.lyrics.translation.status}|${Object.keys(state.lyrics.translation.byLineId).join(',')}`;
-  const queueKey = `${state.queue.status}|${state.queue.currentItemId}|${state.queue.items.map(i => i.itemId).join(',')}`;
+  const translationKey = [uiState.translationVisible, state.lyrics.translation.status,
+    Object.entries(state.lyrics.translation.byLineId).map(([id, text]) => `${id}:${text}`).join(SEP),
+  ].join('|');
+  const queueKey = [state.queue.status, state.queue.currentItemId,
+    state.queue.items.map(i => [i.itemId, i.title, i.artist, i.artworkUrl].join(':')).join(SEP),
+  ].join('|');
 
   // 音量が正のときだけ記憶する。「音量0から戻す」のは UI 独自の親切機能。
   if (state.player.volume > 0) uiState.lastNonzeroVolume = state.player.volume;
 
-  const trackChanged = rendered.trackItemId !== (track ? track.itemId : null);
-  if (trackChanged || rendered.paletteKey !== paletteKey) {
+  // 「再生が新しく始まったか」は instanceId で見る。キュー項目IDで見ると、
+  // 実機で並べ替えが起きたときに曲が変わっていないのに変わったと誤認する。
+  const trackChanged = rendered.trackInstanceId !== (track ? track.instanceId : null);
+  const songChanged = rendered.videoId !== (track ? track.videoId : null);
+  if (rendered.trackKey !== trackKey || rendered.paletteKey !== paletteKey) {
     renderTrack();
-    rendered.trackItemId = track ? track.itemId : null;
+    rendered.trackKey = trackKey;
     rendered.paletteKey = paletteKey;
   }
-  if (trackChanged) {
-    uiState.follow = true;
-    if (previous.player.track && track) announce(`${track.title}を再生`);
-  }
+  rendered.trackInstanceId = track ? track.instanceId : null;
+  rendered.videoId = track ? track.videoId : null;
+  if (trackChanged) uiState.follow = true;
+  // 読み上げは曲が変わったときだけ。リピート1の折り返しで同じ曲名を繰り返さない。
+  if (songChanged && previous.player.track && track) announce(`${track.title}を再生`);
   if (rendered.lyricsKey !== lyricsKey) {
     rebuildLines();
     rendered.lyricsKey = lyricsKey;
@@ -409,8 +548,29 @@ function onState(state) {
 
   renderTransport();
   renderPanels();
+  restoreLyricsFocus();
   const { position, duration } = adapter.getPosition();
   updateProgress(position, duration);
+}
+
+/**
+ * 歌詞の再取得後にフォーカスを戻す。
+ *
+ * 「もう一度読み込む」を押すとそのボタンが hidden になるため、何もしないと
+ * フォーカスが body へ落ちる。押した直後は状態表示へ、復帰したら歌詞へ移す
+ * （旧実装にはあった挙動で、Phase 6a で失われていた）。
+ * 利用者が自分でどこかへフォーカスを移していたら、それを奪わない。
+ */
+function restoreLyricsFocus() {
+  if (!uiState.pendingLyricsFocus) return;
+  const status = effectiveLyricsStatus();
+  if (status === 'loading') return;
+  const active = document.activeElement;
+  const ours = !active || active === document.body || $('lyric-message').contains(active);
+  uiState.pendingLyricsFocus = false;
+  if (!ours) return;
+  if (status === 'ready' && !viewport.hidden) viewport.focus({ preventScroll: true });
+  else $('lyric-message').focus();
 }
 
 /** UIローカル状態だけを変えたときの再描画。Adapter は関係しない。 */
@@ -430,35 +590,48 @@ function renderLocal() {
 const nextRepeat = mode => REPEAT_MODES[(REPEAT_MODES.indexOf(mode) + 1) % REPEAT_MODES.length];
 
 function togglePlay() {
-  const status = latest.player.playback.status;
-  if (status === 'paused' || status === 'ended' || status === 'idle') adapter.play();
-  else adapter.pause();
+  // 目標値の計算は runAction が実行する瞬間に行う。応答待ち中に押されたぶんも、
+  // 確定後の最新の状態から計算し直される。
+  runAction('playpause', { label: '再生の切り替え' }, () => {
+    const status = latest.player.playback.status;
+    return (status === 'paused' || status === 'ended' || status === 'idle')
+      ? adapter.play() : adapter.pause();
+  });
 }
 
 $('play').onclick = togglePlay;
-$('next').onclick = () => adapter.next();
-$('previous').onclick = () => adapter.previous();
+// 曲送りは「押した回数」に意味があるので、待たされたぶんも順に実行する。
+$('next').onclick = () => runAction('skip', { label: '次の曲へ', policy: 'sequence' }, () => adapter.next());
+$('previous').onclick = () => runAction('skip', { label: '前の曲へ', policy: 'sequence' }, () => adapter.previous());
 // 目標値を渡す。相対操作（cycleRepeat / toggleShuffle）は契約に無い。
 // 目標値は「直近に Adapter から受け取った値」から計算する。
-$('shuffle').onclick = () => adapter.setShuffle(!latest.player.shuffle);
-$('repeat').onclick = () => adapter.setRepeat(nextRepeat(latest.player.repeat));
-$('retry').onclick = () => adapter.reloadLyrics();
+$('shuffle').onclick = () => runAction('shuffle', { label: 'シャッフルの切り替え' },
+  () => adapter.setShuffle(!latest.player.shuffle));
+$('repeat').onclick = () => runAction('repeat', { label: 'リピートの変更' },
+  () => adapter.setRepeat(nextRepeat(latest.player.repeat)));
+$('retry').onclick = () => {
+  // このボタンは取得中のあいだ hidden になる。フォーカスを失う前に状態表示へ移す。
+  uiState.pendingLyricsFocus = true;
+  $('lyric-message').tabIndex = -1;
+  $('lyric-message').focus();
+  runAction('lyrics', { label: '歌詞の再取得' }, () => adapter.reloadLyrics());
+};
 
-$('mute').onclick = () => {
+$('mute').onclick = () => runAction('volume', { label: '消音の切り替え' }, () => {
   // 音量0からの復帰は UI 独自の機能。YTM の消音とは別物なので分けて扱う。
   if (latest.player.volume === 0) {
-    adapter.setVolume(uiState.lastNonzeroVolume);
-    adapter.setMuted(false);
-  } else {
-    adapter.setMuted(!latest.player.muted);
+    return adapter.setVolume(uiState.lastNonzeroVolume)
+      .then(result => (result.ok ? adapter.setMuted(false) : result));
   }
-};
+  return adapter.setMuted(!latest.player.muted);
+});
 
 $('volume').addEventListener('pointerdown', () => { uiState.volumeDragging = true; });
 addEventListener('pointerup', () => { uiState.volumeDragging = false; });
 $('volume').oninput = event => {
   $('volume-value').value = event.target.value;
-  adapter.setVolume(Number(event.target.value));
+  const target = Number(event.target.value);
+  runAction('volume', { label: '音量の変更' }, () => adapter.setVolume(target));
 };
 
 $('seek').addEventListener('pointerdown', () => {
@@ -470,7 +643,8 @@ $('seek').oninput = event => {
   updateProgress(uiState.seekPreview, latest.player.playback.duration);
 };
 $('seek').onchange = event => {
-  adapter.seek(Number(event.target.value));
+  const target = Number(event.target.value);
+  runAction('seek', { label: '再生位置の移動' }, () => adapter.seek(target));
   uiState.seeking = false;
   uiState.seekPreview = null;
 };
@@ -478,9 +652,14 @@ addEventListener('pointerup', () => { uiState.seeking = false; uiState.seekPrevi
 addEventListener('pointercancel', () => { uiState.seeking = false; uiState.seekPreview = null; });
 
 $('translation').onchange = event => {
-  uiState.translationVisible = event.target.checked;
+  const wanted = event.target.checked;
+  uiState.translationVisible = wanted;
   // 「見せたい」は UI ローカル、「取りに行く」は Adapter。
-  adapter.setTranslationWanted(event.target.checked);
+  // 取りに行けなかったら、見せたいという UI 側の状態も戻す。
+  // そうしないとチェックだけ入って何も出ない状態が残る。
+  runAction('translation', { label: '翻訳の取得' },
+    () => adapter.setTranslationWanted(wanted),
+    () => { uiState.translationVisible = false; renderLocal(); });
   renderLocal();
 };
 $('contrast').onchange = event => { uiState.highContrast = event.target.checked; renderLocal(); };
@@ -551,7 +730,10 @@ document.addEventListener('keydown', event => {
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
     event.preventDefault();
-    adapter.seek(adapter.getPosition().position + (event.key === 'ArrowLeft' ? -5 : 5));
+    const delta = event.key === 'ArrowLeft' ? -5 : 5;
+    // 目標値は実行する瞬間の再生位置から求める。連打しても取りこぼさない。
+    runAction('seek', { label: '再生位置の移動' },
+      () => adapter.seek(adapter.getPosition().position + delta));
   }
 });
 

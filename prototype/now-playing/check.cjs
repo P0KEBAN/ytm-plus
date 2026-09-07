@@ -74,6 +74,14 @@ const server=http.createServer((req,res)=>{
  await paintedIs('再生へ戻した後','pause-icon');
  for(const mode of ['全曲','1曲','オフ']) {await page.locator('#repeat').click();check(`repeat ${mode}`,await page.locator('#repeat').getAttribute('aria-label')===`リピート：${mode}`);}
  await page.locator('#shuffle').click();check('shuffle toggle',await page.locator('#shuffle').getAttribute('aria-pressed')==='true');
+ // 応答待ち中の連打で操作が失われないこと。UIは目標値を「直近に受け取った値」から
+ // 計算するので、直列化しないと2連打が setRepeat('ALL') 2回になり ONE へ進まない。
+ await page.evaluate(()=>{const r=document.getElementById('repeat');r.click();r.click()});
+ await page.waitForTimeout(200);
+ check('リピート2連打が ONE まで進む（操作が失われない）',await page.locator('#repeat').getAttribute('aria-label')==='リピート：1曲');
+ check('連打しても押した回数ぶんだけ発行される',(await page.evaluate(()=>window.__adapterCalls.filter(c=>c.method==='setRepeat').map(c=>c.args[0]))).slice(-2).join(',')==='ALL,ONE');
+ check('応答待ちでもボタンを無効化しない（フォーカスを失わないため）',!(await page.locator('#repeat').isDisabled()));
+ while(await page.locator('#repeat').getAttribute('aria-label')!=='リピート：オフ'){await page.locator('#repeat').click();await page.waitForTimeout(60)}
  await page.locator('#repeat').click();await page.locator('#repeat').click();
  check('リピート1のバッジが描画される',await page.evaluate(()=>{const b=document.querySelector('.repeat-one');const r=b.getBoundingClientRect();return !b.hidden&&r.width>0&&r.height>0}));
  await page.waitForTimeout(300);await page.screenshot({path:dir+'/1440-shuffle-repeat-one.png'});
@@ -89,6 +97,8 @@ const server=http.createServer((req,res)=>{
  await page.locator('#title').filter({hasText:'夜明けまであと少しだけ'}).waitFor();
  check('queue selects warm track',await page.locator('#title').textContent()==='夜明けまであと少しだけ、この街の音を聴いていたい');
  check('palette source updated',await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--art-primary').trim())==='#a34b38');
+ // 選曲すると renderQueue が全ボタンを差し替える。フォーカスを body へ落とさないこと。
+ check('キュー選択後もフォーカスがキュー項目に残る',await page.evaluate(()=>document.activeElement.classList.contains('queue-item')));
  await page.keyboard.press('Escape');check('queue Escape restores trigger focus',await page.evaluate(()=>document.activeElement.id)==='queue-view');
  await page.setViewportSize({width:1100,height:700});await load('long');
  await page.locator('#more').click();await page.locator('#translation').check();await page.keyboard.press('Escape');
@@ -105,7 +115,12 @@ const server=http.createServer((req,res)=>{
   if(state==='paused')await paintedIs('状態paused','play-icon');
   if(state==='loading'){check('buffering separate from paused',await page.locator('#spinner').isVisible()&&await page.locator('#playback-message').textContent()==='読み込み中…');await paintedIs('状態loading','spinner');}
   if(state==='translation')check('translated lines visible',await page.locator('.translation').evaluateAll(es=>es.filter(e=>!e.hidden&&e.textContent.trim()).length)===7);
-  if(state==='lyrics-error'){await page.locator('#retry').click();check('retry loading visible',await page.locator('#lyric-message-text').textContent()==='歌詞を読み込んでいます…');await page.waitForTimeout(800);check('retry recovers mock lyrics',await page.locator('#lyric-viewport').isVisible());}
+  if(state==='lyrics-error'){await page.locator('#retry').click();check('retry loading visible',await page.locator('#lyric-message-text').textContent()==='歌詞を読み込んでいます…');
+  // 「もう一度読み込む」は取得中に hidden になる。押した直後は状態表示へ、
+  // 復帰したら歌詞へフォーカスを移す。何もしないと body へ落ちる。
+  check('再試行中はフォーカスが状態表示にある',await page.evaluate(()=>document.activeElement.id)==='lyric-message');
+  await page.waitForTimeout(800);check('retry recovers mock lyrics',await page.locator('#lyric-viewport').isVisible());
+  check('歌詞が復帰したらフォーカスが歌詞領域へ移る',await page.evaluate(()=>document.activeElement.id)==='lyric-viewport');}
  }
  await load();await page.locator('#lyric-viewport').hover();await page.mouse.wheel(0,150);await page.locator('#resume-follow').waitFor({state:'visible'});check('manual scroll suspends follow',await page.locator('#resume-follow').isVisible());
  await page.locator('#resume-follow').click();check('resume hides return button',!(await page.locator('#resume-follow').isVisible()));
@@ -114,6 +129,24 @@ const server=http.createServer((req,res)=>{
  await page.locator('#next').focus();
  // 行を選ぶと現在行が動き、追従がなめらかにスクロールする。落ち着くまで待つ。
  await page.waitForTimeout(600);await page.screenshot({path:dir+'/1440-focus.png'});
+ // 失敗系。?fail= で全操作を失敗させ、UIが結果を捨てていないことを確かめる。
+ // 以前は Promise<OpResult> を全部捨てていたので timeout も rejected も伝わらなかった。
+ await page.goto(base+'?state=playing&capture=1&probe=1&fail=timeout');
+ await page.waitForFunction(()=>window.__adapterCalls);await page.waitForTimeout(400);
+ const repeatBefore=await page.locator('#repeat').getAttribute('aria-label');
+ await page.locator('#repeat').click();await page.waitForTimeout(200);
+ check('操作の失敗が画面に出る',(await page.locator('#playback-message').textContent()).includes('リピートの変更に失敗しました'));
+ check('失敗した操作でUIの表示が先走らない',await page.locator('#repeat').getAttribute('aria-label')===repeatBefore);
+ // .check() は「押した状態が残ること」を要求するので使えない。ここでは戻るのが正しい。
+ await page.locator('#more').click();await page.locator('#translation').click({force:true});await page.waitForTimeout(200);
+ check('翻訳の取得に失敗したらチェックも戻る',await page.locator('#translation').isChecked()===false);
+ await page.keyboard.press('Escape');
+ await page.screenshot({path:dir+'/1440-op-failure.png'});
+ // capability が false のとき、押しても何も起きないボタンを黙って出さないこと（契約 §3.8）。
+ await page.goto(base+'?state=playing&capture=1&probe=1&caps=repeat,shuffle,volume');
+ await page.waitForFunction(()=>window.__adapterCalls);await page.waitForTimeout(400);
+ check('できない操作のボタンは無効化される',await page.evaluate(()=>['repeat','shuffle','volume','mute'].every(id=>document.getElementById(id).disabled)));
+ await page.screenshot({path:dir+'/1440-no-capabilities.png'});
  await page.emulateMedia({reducedMotion:'reduce'});await load('playing',false);
  await page.addStyleTag({content:'.stage,.view-switch { visibility: hidden !important; }'});const bg1=await page.locator('#smoke').screenshot();await page.waitForTimeout(500);const bg2=await page.locator('#smoke').screenshot();check('reduced motion freezes smoke',bg1.equals(bg2));
  await page.emulateMedia({reducedMotion:'no-preference'});await load('playing',false);await page.addStyleTag({content:'.stage,.view-switch { visibility: hidden !important; }'});const smoke1=await page.locator('#smoke').screenshot();await page.waitForTimeout(1800);const smoke2=await page.locator('#smoke').screenshot();check('smoke really animates',!smoke1.equals(smoke2));

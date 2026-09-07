@@ -9,7 +9,8 @@
  */
 
 import {
-  ok, fail, clampVolume, isRepeatMode, createCapabilities, createPendingOps,
+  ok, fail, clampVolume, isRepeatMode, isLikeStatus, deepFreeze,
+  createCapabilities, createPendingOps,
 } from './types.js';
 
 /**
@@ -42,6 +43,9 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
  * @param {number} [options.translationDelayMs]  翻訳取得の遅延
  * @param {() => number} [options.random]        シャッフルの乱数
  * @param {Partial<import('./types.js').Capabilities>} [options.capabilities]
+ * @param {import('./types.js').OpFailure|null} [options.opFailure]
+ *   設定すると**すべての操作がこの理由で失敗する。** UI の失敗系を実際に見るための障害注入で、
+ *   これが無いとプロトタイプでは `timeout` / `rejected` の表示を一度も確認できない
  * @returns {import('./types.js').PlayerAdapter & {applyScenario: (name: string) => void}}
  */
 export function createMockAdapter(options = {}) {
@@ -54,6 +58,7 @@ export function createMockAdapter(options = {}) {
     translationDelayMs = 400,
     random = Math.random,
     capabilities: capabilityOverrides = {},
+    opFailure = null,
     volume = 42,
     repeat = 'NONE',
     shuffle = false,
@@ -77,7 +82,9 @@ export function createMockAdapter(options = {}) {
     muted: false,
     repeat: isRepeatMode(repeat) ? repeat : 'NONE',
     shuffle: !!shuffle,
-    pending: { transport: false, seek: false, volume: false, repeat: false, shuffle: false },
+    likeStatus: 'none',
+    // 「この再生」を指す不透明な値。曲の再生を新しく始めるたびに変わる（types.js の TrackRef）。
+    instanceId: 'inst-0',
     queueStatus: fixtures.length ? 'ready' : 'idle',
     queueError: null,
     translationWanted: false,
@@ -90,6 +97,28 @@ export function createMockAdapter(options = {}) {
   let revision = 0;
   /** @type {import('./types.js').AdapterState} */
   let state;
+
+  /** 曲の再生を新しく開始したことにする。instanceId が変わる。 */
+  let instanceCounter = 0;
+  function newInstance() {
+    instanceCounter += 1;
+    internal.instanceId = `inst-${instanceCounter}`;
+  }
+
+  /**
+   * 応答待ちの**件数**。真偽値で持つと、同種の操作を重ねたとき
+   * 先の操作が終わった時点で「待機なし」と報告してしまう
+   * （2026-09-07 Codex レビュー 中2）。
+   */
+  const pendingCounts = { transport: 0, seek: 0, volume: 0, repeat: 0, shuffle: 0, like: 0 };
+  const pendingSnapshot = () => createPendingOps({
+    transport: pendingCounts.transport > 0,
+    seek: pendingCounts.seek > 0,
+    volume: pendingCounts.volume > 0,
+    repeat: pendingCounts.repeat > 0,
+    shuffle: pendingCounts.shuffle > 0,
+    like: pendingCounts.like > 0,
+  });
 
   /* ---------------- 時計 ---------------- */
 
@@ -124,7 +153,7 @@ export function createMockAdapter(options = {}) {
     const player = Object.freeze({
       revision,
       track: item ? Object.freeze({
-        itemId: item.itemId,
+        instanceId: internal.instanceId,
         videoId: item.videoId,
         title: item.title,
         artist: item.artist,
@@ -143,8 +172,9 @@ export function createMockAdapter(options = {}) {
       muted: internal.muted,
       repeat: internal.repeat,
       shuffle: internal.shuffle,
+      likeStatus: internal.likeStatus,
       capabilities,
-      pending: createPendingOps(internal.pending),
+      pending: pendingSnapshot(),
     });
     /** @type {import('./types.js').QueueSnapshot} */
     const queue = Object.freeze({
@@ -171,7 +201,8 @@ export function createMockAdapter(options = {}) {
         error: internal.lyrics.translation.error,
       }),
     });
-    return Object.freeze({ player, queue, lyrics });
+    // **深く**凍結する。浅い freeze では palette.ui などが書き換えられてしまう。
+    return deepFreeze({ player, queue, lyrics });
   }
 
   function emit() {
@@ -191,6 +222,7 @@ export function createMockAdapter(options = {}) {
   /* ---------------- 歌詞 ---------------- */
 
   let lyricsToken = 0;
+  let translationToken = 0;
 
   /**
    * 現在曲の歌詞を取りに行く。**遅延取得である。**
@@ -200,6 +232,10 @@ export function createMockAdapter(options = {}) {
     const item = currentItem();
     lyricsToken += 1;
     const token = lyricsToken;
+    // **翻訳のトークンもここで無効化する。** 曲が変わったのに翻訳だけ生きていると、
+    // 前の曲の訳文が「新しい曲の歌詞は取得中なのに翻訳は ready」という
+    // 矛盾したスナップショットとして届く（2026-09-07 Codex レビュー 中1。実際に再現した）。
+    translationToken += 1;
     if (!item || !capabilities.lyrics) {
       internal.lyrics = {
         videoId: item ? item.videoId : null, status: 'idle', lines: [],
@@ -231,8 +267,6 @@ export function createMockAdapter(options = {}) {
     else later(settle, lyricsDelayMs);
   }
 
-  let translationToken = 0;
-
   function maybeLoadTranslation() {
     const item = currentItem();
     translationToken += 1;
@@ -243,8 +277,11 @@ export function createMockAdapter(options = {}) {
       return;
     }
     internal.lyrics.translation = { status: 'loading', byLineId: {}, error: null };
+    const videoId = item.videoId;
     const settle = () => {
-      if (token !== translationToken) return;
+      // トークンと videoId の二重の門番。どちらか片方でも足りるはずだが、
+      // 「前の曲の訳文が現在曲へ混入する」は静かに壊れて気づきにくいので両方置く。
+      if (token !== translationToken || internal.lyrics.videoId !== videoId) return;
       if (item.translationFails) {
         internal.lyrics.translation = { status: 'error', byLineId: {}, error: '翻訳を取得できませんでした' };
       } else {
@@ -277,7 +314,9 @@ export function createMockAdapter(options = {}) {
     if (duration === null || internal.status !== 'playing') return;
     if (positionNow() < duration) return;
     if (internal.repeat === 'ONE') {
+      // 同じ曲だが「再生を新しく開始した」ので instanceId は変わる。
       reanchor(0);
+      newInstance();
       emit();
       return;
     }
@@ -311,6 +350,7 @@ export function createMockAdapter(options = {}) {
     if (!internal.items.some(i => i.itemId === itemId)) return false;
     internal.currentItemId = itemId;
     reanchor(0);
+    newInstance();
     internal.status = play ? 'playing' : 'paused';
     ensureEndWatcher();
     loadLyricsForCurrent();
@@ -320,25 +360,54 @@ export function createMockAdapter(options = {}) {
   /* ---------------- 操作の共通処理 ---------------- */
 
   /**
+   * 応答待ちのまま残っている操作。**destroy のときに全部 rejected で完了させる。**
+   * 登録しておかないと、遅延中に destroy された操作の Promise が永久に pending になる
+   * （2026-09-07 Codex レビュー 中2。実際に再現した）。
+   * @type {Set<(result: import('./types.js').OpResult) => void>}
+   */
+  const outstanding = new Set();
+
+  /**
    * 操作を「pending を立てる → 確定する」の2段で流す。
    * **UI が成功を仮定しないことを、モックの側でも強制する**ための仕組み。
    * apply の戻り値: undefined なら成功、false なら 'not-found'、
-   * 文字列ならそれを失敗理由として返す。
+   * 文字列ならそれを失敗理由として返す。**apply が投げたら 'rejected' に変換する。**
+   *
+   * 守っている約束は3つ。
+   *   - 返した Promise は必ず1回だけ完了する（例外・destroy でも）
+   *   - pending は必ず降りる（try/finally ではなく finish の一本道で保証する）
+   *   - 同種の操作が重なっているあいだは pending が立ったままになる（件数で数える）
    */
   function runOp(key, apply, { requires } = {}) {
     if (destroyed) return Promise.resolve(fail('rejected'));
     if (requires && !capabilities[requires]) return Promise.resolve(fail('unsupported'));
-    internal.pending[key] = true;
+    pendingCounts[key] += 1;
     emit();
     return new Promise((resolve) => {
+      const finish = (result) => {
+        if (!outstanding.delete(finish)) return;    // すでに完了している
+        pendingCounts[key] = Math.max(0, pendingCounts[key] - 1);
+        resolve(result);
+      };
+      outstanding.add(finish);
       const settle = () => {
-        const result = apply();
-        internal.pending[key] = false;
+        if (destroyed) { finish(fail('rejected')); return; }
+        // 障害注入。apply を呼ばないので、状態は変わらないまま失敗が返る。
+        if (opFailure) { finish(fail(opFailure)); emit(); return; }
+        let result;
+        try {
+          result = apply();
+        } catch {
+          // 失敗は例外ではなく戻り値で表す、という契約をモックの側でも守る。
+          finish(fail('rejected'));
+          emit();
+          return;
+        }
+        finish(result === false ? fail('not-found')
+          : typeof result === 'string' ? fail(result)
+          : ok());
         ensureEndWatcher();
         emit();
-        if (result === false) resolve(fail('not-found'));
-        else if (typeof result === 'string') resolve(fail(result));
-        else resolve(ok());
       };
       if (opDelayMs <= 0) Promise.resolve().then(settle);
       else later(settle, opDelayMs);
@@ -411,9 +480,16 @@ export function createMockAdapter(options = {}) {
       internal.shuffle = !!enabled;
     }, { requires: 'shuffle' }),
 
+    // 評価も目標値指定。YTM 側の実体はトグルだが、その変換は Adapter の内側の仕事。
+    setLikeStatus: (status) => runOp('like', () => {
+      if (!isLikeStatus(status)) return false;
+      internal.likeStatus = status;
+    }, { requires: 'like' }),
+
     setTranslationWanted: (enabled) => {
       if (destroyed) return Promise.resolve(fail('rejected'));
       if (!capabilities.translation) return Promise.resolve(fail('unsupported'));
+      if (opFailure) return Promise.resolve(fail(opFailure));
       internal.translationWanted = !!enabled;
       maybeLoadTranslation();
       emit();
@@ -423,6 +499,7 @@ export function createMockAdapter(options = {}) {
     reloadLyrics: () => {
       if (destroyed) return Promise.resolve(fail('rejected'));
       if (!capabilities.lyrics) return Promise.resolve(fail('unsupported'));
+      if (opFailure) return Promise.resolve(fail(opFailure));
       loadLyricsForCurrent();
       emit();
       return Promise.resolve(ok());
@@ -434,6 +511,8 @@ export function createMockAdapter(options = {}) {
       for (const id of timers) clearTimeout(id);
       timers.clear();
       if (endWatcher !== null) { clearInterval(endWatcher); endWatcher = null; }
+      // 応答待ちの操作を永久 pending のまま捨てない。呼び出し側の await が返らなくなる。
+      for (const finish of Array.from(outstanding)) finish(fail('rejected'));
     },
 
     /* ------ 以下はモック専用。契約には含まれない ------ */
@@ -448,6 +527,7 @@ export function createMockAdapter(options = {}) {
       if (!target) return;
       internal.currentItemId = target.itemId;
       reanchor(byIndex[name] === undefined ? 140 : 10);
+      newInstance();
       internal.status = name === 'paused' ? 'paused' : name === 'loading' ? 'buffering' : 'playing';
       internal.translationWanted = name === 'translation';
       lyricsToken += 1;
@@ -477,10 +557,12 @@ export function createMockAdapter(options = {}) {
       internal.muted = false;
       internal.repeat = 'NONE';
       internal.shuffle = false;
+      internal.likeStatus = 'none';
       emit();
     },
   };
 
+  newInstance();
   state = buildState();
   loadLyricsForCurrent({ immediate: true });
   state = buildState();

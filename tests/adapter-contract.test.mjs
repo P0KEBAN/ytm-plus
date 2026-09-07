@@ -2,9 +2,13 @@
  * Player Adapter の契約テスト（MockAdapter に対して）。
  *
  * 契約の本体は tests/helpers/adapter-contract.mjs にある。
- * Phase 6c で YtmAdapter を実装したら、**同じ本体をそちらにも当てる。**
- * 両方で通ることが「モックと実プレイヤーで同じインターフェースを使える」
- * という完了条件の証拠になる。
+ * Phase 6c で YtmAdapter を実装したら、**偽の YTM バックエンドの上で**同じ本体を当てる。
+ *
+ * **実機の YouTube Music へ直接当てるテストではない。** 本体は「キューを自由に組める・
+ * 音量やリピートを書き換えてよい・歌詞が決められた時間内に必ず届く」を前提にしていて、
+ * 実機に当てれば非決定的になるうえ利用者の設定を書き換えてしまう。
+ * 実機との接続（MAIN world 往復・実 DOM・タイムアウト）は Phase 6d の統合確認で別に見る。
+ * 経緯は helpers/adapter-contract.mjs の冒頭と docs/ADAPTER-CONTRACT.md §6。
  *
  * このファイルには、それに加えてモック実装固有の検査も置く。
  */
@@ -109,15 +113,50 @@ test('[MockAdapter] reloadLyrics は取得中からやり直す', async () => {
 });
 
 test('[MockAdapter] capabilities が false の操作は unsupported を返す', async () => {
-  const adapter = createAdapter({ capabilities: { volume: false, repeat: false, shuffle: false } });
+  const adapter = createAdapter({
+    capabilities: { volume: false, repeat: false, shuffle: false, like: false, queue: false },
+  });
   try {
     assert.equal((await adapter.setVolume(50)).reason, 'unsupported');
     assert.equal((await adapter.setMuted(true)).reason, 'unsupported');
     assert.equal((await adapter.setRepeat('ALL')).reason, 'unsupported');
     assert.equal((await adapter.setShuffle(true)).reason, 'unsupported');
+    assert.equal((await adapter.setLikeStatus('like')).reason, 'unsupported');
+    assert.equal((await adapter.selectQueueItem('q2')).reason, 'unsupported');
     // 値も変わっていないこと
     assert.equal(adapter.getState().player.repeat, 'NONE');
     assert.equal(adapter.getState().player.shuffle, false);
+    assert.equal(adapter.getState().player.likeStatus, 'none');
+  } finally { adapter.destroy(); }
+});
+
+test('[MockAdapter] 操作の内部処理が例外を投げても rejected として完了し、pending が残らない', async () => {
+  const adapter = createAdapter();
+  try {
+    // Number() の中で投げる値を渡すと、runOp の apply が例外を出す。
+    // 失敗は例外ではなく戻り値で表す、という契約が守られていることを確かめる。
+    const hostile = { valueOf() { throw new Error('boom'); } };
+    const result = await adapter.setVolume(hostile);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'rejected');
+    assert.equal(adapter.getState().player.pending.volume, false, 'pending が残っている');
+    // 続く操作がふつうに通ること
+    assert.equal((await adapter.setVolume(31)).ok, true);
+    assert.equal(adapter.getState().player.volume, 31);
+  } finally { adapter.destroy(); }
+});
+
+test('[MockAdapter] リピート ONE の折り返しでも instanceId は新しくなる', async () => {
+  let clock = 0;
+  const adapter = createAdapter({ now: () => clock });
+  try {
+    await adapter.setRepeat('ONE');
+    await adapter.play();
+    const before = adapter.getState().player.track.instanceId;
+    clock += 13_000;                       // 曲長12秒を超える
+    await waitFor(() => adapter.getPosition().position < 1, { label: 'wrap to head' });
+    assert.notEqual(adapter.getState().player.track.instanceId, before,
+      '同じ曲を頭から鳴らし直したのに instanceId が変わっていない');
   } finally { adapter.destroy(); }
 });
 

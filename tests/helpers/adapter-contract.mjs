@@ -1,20 +1,53 @@
 /**
  * Player Adapter 契約テストの本体。
  *
- * **1本のテストを MockAdapter と YtmAdapter の両方に当てる**ためにここへ切り出してある。
- * 「モックと実プレイヤーで同じ状態インターフェースを使える」という
- * Phase 6 の完了条件は、これが両方で通ることで証明される。
- *
  * このフォルダは `node --test tests/*.mjs` のグロブに入らない（tests/helpers/ 配下のため）。
  * ここに test() を書かないこと。呼び出し側のテストファイルから runAdapterContract() を呼ぶ。
  *
  * 既存テスト9本のような「ソースを正規表現で検査する」方式にはしていない。
  * あの方式は関数名を変えただけで壊れるのでリファクタリングの安全網にならない
  * （private-docs/HANDOFF.md §6）。ここでは実際に動かして振る舞いを見る。
+ *
+ * ## ★ これは「実機に当てるテスト」ではない（2026-09-07 Codex レビュー 高3）
+ *
+ * Phase 6a では「同じ本体を YtmAdapter にも当てれば、モックと実プレイヤーで同じ
+ * インターフェースを使えることの証明になる」と書いていた。**これは成り立たない。**
+ * 下の PRECONDITIONS が示すとおり、この本体は
+ *
+ *   - キューを自由に組める
+ *   - 音量・リピート・シャッフル・評価・再生中の曲を**実際に書き換えてよい**
+ *   - 歌詞と翻訳が決められた時間内に必ず ready になる
+ *
+ * という**制御可能なバックエンド**を前提にしている。動いている YouTube Music へ
+ * 直接当てれば、非決定的になるうえに利用者の設定を書き換えてしまう。
+ *
+ * そこでテストは2層に分ける。
+ *
+ * | 層 | 対象 | 何を証明するか | いつ |
+ * | --- | --- | --- | --- |
+ * | 契約・状態遷移（この本体） | MockAdapter / 偽 YTM バックエンド上の YtmAdapter | 契約の形と状態遷移が同じであること | Phase 6c |
+ * | 実機統合（別物） | 実機の YtmAdapter | MAIN world 往復・実 DOM 接続・タイムアウト・曲変更・timeOffset | Phase 6d |
+ *
+ * **この本体が YtmAdapter で通っても、実 DOM に繋がっている証明にはならない。**
+ * 偽バックエンドは `bar` / `<video>` / キュー DOM を差し替えたものであり、
+ * 実機との接続は 6d の統合確認（手順は private-docs 側に置く）で別に確かめる。
  */
 
 import assert from 'node:assert/strict';
-import { ADAPTER_METHODS, REPEAT_MODES, lyricsMatchTrack } from '../../src/js/newui/adapter/types.js';
+import {
+  ADAPTER_METHODS, REPEAT_MODES, LIKE_STATUSES, PLAYBACK_STATUS, LYRICS_STATUS,
+  lyricsMatchTrack,
+} from '../../src/js/newui/adapter/types.js';
+
+/** この本体が実装に要求する前提。満たせない実装にはそのまま当てられない。 */
+export const PRECONDITIONS = Object.freeze([
+  'キュー項目が2件以上ある',
+  '同じ videoId を持つキュー項目が2件ある（安定IDの検査に要る）',
+  '音量・リピート・シャッフル・評価・再生中の曲をテストから変更してよい',
+  '再生すると positionAdvanceMs 以内に再生位置が進む',
+  '歌詞が settleTimeoutMs 以内に ready になり、行が1行以上ある',
+  '翻訳が settleTimeoutMs 以内に ready になり、訳文が1件以上ある',
+]);
 
 /** 指定ミリ秒待つ。タイマー起因の確定を待つためだけに使う。 */
 export const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -29,6 +62,13 @@ export async function waitFor(predicate, { timeout = 1500, label = 'condition' }
   assert.fail(`timed out waiting for ${label}`);
 }
 
+/** 入れ子まで含めて凍結されているかを確かめる。 */
+function assertDeeplyFrozen(value, path = 'state') {
+  if (value === null || typeof value !== 'object') return;
+  assert.ok(Object.isFrozen(value), `${path} が凍結されていない`);
+  for (const key of Object.keys(value)) assertDeeplyFrozen(value[key], `${path}.${key}`);
+}
+
 /**
  * 契約テスト本体。
  *
@@ -36,16 +76,39 @@ export async function waitFor(predicate, { timeout = 1500, label = 'condition' }
  * @param {(name: string, fn: () => any) => void} api.test  テストランナーの test()
  * @param {string} api.label  実装の名前（失敗メッセージ用）
  * @param {(overrides?: object) => import('../../src/js/newui/adapter/types.js').PlayerAdapter} api.createAdapter
- *   毎回まっさらな Adapter を作る。overrides は実装固有の設定
+ *   毎回まっさらな Adapter を作る。overrides は実装固有の設定。**上の PRECONDITIONS を満たすこと。**
+ * @param {number} [api.positionAdvanceMs]  再生位置が進むことを確かめるための待ち時間
+ * @param {number} [api.settleTimeoutMs]    歌詞・翻訳の取得を待つ上限
  */
-export function runAdapterContract({ test, label, createAdapter }) {
+export function runAdapterContract({
+  test, label, createAdapter,
+  positionAdvanceMs = 120,
+  settleTimeoutMs = 1500,
+}) {
   const name = (text) => `[${label}] ${text}`;
+  const settle = { timeout: settleTimeoutMs };
 
   /** 生成したアダプタを必ず片付けるための小道具。 */
   const withAdapter = (fn) => async () => {
     const adapter = createAdapter();
     try { await fn(adapter); } finally { adapter.destroy(); }
   };
+
+  /* ---------------- 前提 ---------------- */
+
+  // 前提を満たさない実装に当てたとき、**黙って素通りせずここで落ちる**ようにする。
+  // 以前は「重複 videoId が無ければ検査しない」のように静かに諦める書き方があり、
+  // 別実装へ当てたときに通ったように見えてしまう穴になっていた。
+  test(name('契約テストの前提を満たしている'), withAdapter(async (adapter) => {
+    const { queue } = adapter.getState();
+    assert.ok(queue.items.length >= 2, `前提: ${PRECONDITIONS[0]}`);
+    const counts = new Map();
+    for (const item of queue.items) counts.set(item.videoId, (counts.get(item.videoId) || 0) + 1);
+    assert.ok([...counts.values()].some(n => n >= 2), `前提: ${PRECONDITIONS[1]}`);
+    await waitFor(() => adapter.getState().lyrics.status === 'ready',
+      { ...settle, label: `前提: ${PRECONDITIONS[4]}` });
+    assert.ok(adapter.getState().lyrics.lines.length > 0, `前提: ${PRECONDITIONS[4]}`);
+  }));
 
   /* ---------------- 形 ---------------- */
 
@@ -55,15 +118,36 @@ export function runAdapterContract({ test, label, createAdapter }) {
     }
   }));
 
-  test(name('getState はスナップショット3つを返し、凍結されている'), withAdapter((adapter) => {
+  test(name('getState はスナップショット3つを返し、入れ子まで凍結されている'), withAdapter((adapter) => {
     const state = adapter.getState();
     for (const key of ['player', 'queue', 'lyrics']) {
       assert.ok(state[key], `${key} が無い`);
     }
     // UI が状態を書き換えられないことを型ではなく実物で保証する。
-    assert.ok(Object.isFrozen(state), 'state が凍結されていない');
-    assert.ok(Object.isFrozen(state.player), 'player が凍結されていない');
-    assert.ok(Object.isFrozen(state.player.playback), 'playback が凍結されていない');
+    // 浅い freeze では track.palette.ui が書き換えられてしまう実績がある。
+    assertDeeplyFrozen(state);
+  }));
+
+  test(name('パレットも書き換えられない'), withAdapter((adapter) => {
+    const palette = adapter.getState().player.track.palette;
+    if (!palette) return;   // パレット未抽出は正常な状態
+    const before = palette.ui.primary;
+    assert.throws(() => { palette.ui.primary = '#ff0000'; },
+      'palette.ui が書き換えられる');
+    assert.equal(adapter.getState().player.track.palette.ui.primary, before);
+  }));
+
+  test(name('revision は通知のたびに単調増加する'), withAdapter(async (adapter) => {
+    const revisions = [];
+    adapter.subscribe(state => revisions.push(state.player.revision));
+    await adapter.play();
+    await adapter.setVolume(33);
+    await adapter.setRepeat('ALL');
+    assert.ok(revisions.length >= 2, '通知が発生していない');
+    for (let i = 1; i < revisions.length; i += 1) {
+      assert.ok(revisions[i] > revisions[i - 1],
+        `revision が増えていない: ${revisions[i - 1]} → ${revisions[i]}`);
+    }
   }));
 
   /* ---------------- 購読 ---------------- */
@@ -91,7 +175,7 @@ export function runAdapterContract({ test, label, createAdapter }) {
     adapter.subscribe(() => { count += 1; });
     const baseline = count;              // 初回同期呼び出し分
     const startPosition = adapter.getPosition().position;
-    await wait(120);
+    await wait(positionAdvanceMs);
     // 位置は進んでいるのに
     assert.ok(
       adapter.getPosition().position > startPosition,
@@ -110,7 +194,7 @@ export function runAdapterContract({ test, label, createAdapter }) {
   /* ---------------- 再生状態 ---------------- */
 
   test(name('再生状態は単一の列挙で、矛盾する組み合わせを表現できない'), withAdapter(async (adapter) => {
-    const statuses = new Set(['idle', 'playing', 'buffering', 'paused', 'ended']);
+    const statuses = new Set(PLAYBACK_STATUS);
     assert.ok(statuses.has(adapter.getState().player.playback.status));
     await adapter.play();
     assert.equal(adapter.getState().player.playback.status, 'playing');
@@ -130,7 +214,7 @@ export function runAdapterContract({ test, label, createAdapter }) {
     await wait(60);
     await adapter.pause();
     const stopped = adapter.getPosition().position;
-    await wait(120);
+    await wait(positionAdvanceMs);
     assert.equal(adapter.getPosition().position, stopped, '停止中なのに位置が進んでいる');
   }));
 
@@ -152,6 +236,45 @@ export function runAdapterContract({ test, label, createAdapter }) {
     await promise;
     assert.equal(adapter.getState().player.pending.repeat, false, 'pending が降りていない');
   }));
+
+  test(name('操作が失敗しても pending は必ず降りる'), withAdapter(async (adapter) => {
+    const result = await adapter.selectQueueItem('存在しないID');
+    assert.equal(result.ok, false);
+    assert.equal(adapter.getState().player.pending.transport, false,
+      '失敗した操作の pending が残っている');
+  }));
+
+  test(name('同種の操作が重なっているあいだ pending は立ったまま'), withAdapter(async (adapter) => {
+    // 先に出した操作が終わった時点で「待機なし」と報告してはならない。
+    // 真偽値で持っていると、後続が残っているのに pending が降りる。
+    //
+    // `await` の後で getState() を見る書き方だと、遅延0の実装では
+    // 2件目の確定まで進んでしまい race になる。**通知の列**を見て判定する。
+    const seen = [];
+    adapter.subscribe(state => seen.push({
+      volume: state.player.volume, pending: state.player.pending.volume,
+    }));
+    const first = adapter.setVolume(11);
+    const second = adapter.setVolume(77);
+    await Promise.all([first, second]);
+    // 1件目が反映された時点のスナップショット（2件目はまだ応答待ち）
+    const afterFirst = seen.find(s => s.volume === 11 && seen.indexOf(s) > 0);
+    assert.ok(afterFirst, '1件目が反映された時点の通知が来ていない');
+    assert.equal(afterFirst.pending, true, '後続の操作が残っているのに pending が降りている');
+    assert.equal(adapter.getState().player.pending.volume, false, '最後まで pending が降りない');
+    assert.equal(adapter.getState().player.volume, 77, '後から出した操作が反映されていない');
+  }));
+
+  test(name('destroy すると応答待ちの操作も必ず完了する'), async () => {
+    const adapter = createAdapter();
+    let settled = false;
+    const promise = adapter.setRepeat('ALL').then((result) => { settled = true; return result; });
+    adapter.destroy();
+    const result = await Promise.race([promise, wait(300).then(() => 'timeout')]);
+    assert.equal(settled, true, 'destroy 後も Promise が pending のまま残っている');
+    assert.notEqual(result, 'timeout');
+    assert.equal(result.ok, false, 'destroy されたのに成功として完了している');
+  });
 
   /* ---------------- 目標値指定 ---------------- */
 
@@ -176,6 +299,20 @@ export function runAdapterContract({ test, label, createAdapter }) {
     assert.equal(adapter.getState().player.shuffle, true, '同じ目標値の再指定で値が反転した');
     await adapter.setShuffle(false);
     assert.equal(adapter.getState().player.shuffle, false);
+  }));
+
+  test(name('setLikeStatus は目標値を指定する。トグルは契約に無い'), withAdapter(async (adapter) => {
+    assert.equal(typeof adapter.toggleLike, 'undefined', 'toggleLike が残っている');
+    assert.ok(LIKE_STATUSES.includes(adapter.getState().player.likeStatus),
+      'likeStatus が列挙の外の値になっている');
+    for (const status of LIKE_STATUSES) {
+      const result = await adapter.setLikeStatus(status);
+      assert.equal(result.ok, true, `setLikeStatus(${status}) が失敗した`);
+      assert.equal(adapter.getState().player.likeStatus, status);
+    }
+    await adapter.setLikeStatus('like');
+    await adapter.setLikeStatus('like');
+    assert.equal(adapter.getState().player.likeStatus, 'like', '同じ目標値の再指定で値が動いた');
   }));
 
   test(name('seekToLyricLine は契約に存在しない'), withAdapter((adapter) => {
@@ -211,11 +348,40 @@ export function runAdapterContract({ test, label, createAdapter }) {
     assert.equal(adapter.getState().player.muted, false);
   }));
 
+  /* ---------------- 曲とキューの分離 ---------------- */
+
+  test(name('TrackRef はキュー所属を持たない。正本は queue.currentItemId'), withAdapter((adapter) => {
+    const { track } = adapter.getState().player;
+    assert.ok(track, 'この検査には現在曲が要る');
+    assert.equal(track.itemId, undefined,
+      'TrackRef が itemId を持っている。キュー未取得やブリッジ停止を表現できなくなる');
+    assert.equal(typeof track.instanceId, 'string');
+    assert.ok(track.instanceId.length > 0, 'instanceId が空');
+    assert.equal(typeof track.videoId, 'string');
+  }));
+
+  test(name('曲を変えると instanceId が変わる'), withAdapter(async (adapter) => {
+    const before = adapter.getState().player.track.instanceId;
+    const target = adapter.getState().queue.items
+      .find(i => i.itemId !== adapter.getState().queue.currentItemId);
+    await adapter.selectQueueItem(target.itemId);
+    assert.notEqual(adapter.getState().player.track.instanceId, before,
+      '曲を変えたのに instanceId が同じ。UI が曲変更を検知できない');
+  }));
+
+  test(name('currentItemId は null になりうるが、非 null ならキュー項目と対応する'), withAdapter((adapter) => {
+    const { queue } = adapter.getState();
+    assert.ok(queue.currentItemId === null || typeof queue.currentItemId === 'string');
+    if (queue.currentItemId !== null && queue.status === 'ready') {
+      assert.ok(queue.items.some(i => i.itemId === queue.currentItemId),
+        'currentItemId がキューのどの項目とも対応していない');
+    }
+  }));
+
   /* ---------------- キュー ---------------- */
 
   test(name('キュー項目は安定IDを持ち、配列インデックスに依存しない'), withAdapter(async (adapter) => {
     const { queue } = adapter.getState();
-    assert.ok(queue.items.length >= 2, 'テストにはキュー項目が2つ以上必要');
     for (const item of queue.items) {
       assert.equal(typeof item.itemId, 'string');
       assert.ok(item.itemId.length > 0, 'itemId が空');
@@ -227,24 +393,21 @@ export function runAdapterContract({ test, label, createAdapter }) {
     assert.equal(adapter.getState().player.trackIndex, undefined, 'trackIndex が残っている');
   }));
 
-  test(name('現在曲は itemId で指され、キュー項目と対応する'), withAdapter(async (adapter) => {
-    const state = adapter.getState();
-    assert.equal(state.player.track.itemId, state.queue.currentItemId);
-    assert.ok(state.queue.items.some(i => i.itemId === state.queue.currentItemId));
-  }));
-
   test(name('selectQueueItem は itemId で選曲する'), withAdapter(async (adapter) => {
     const target = adapter.getState().queue.items[1];
     const result = await adapter.selectQueueItem(target.itemId);
     assert.equal(result.ok, true);
     assert.equal(adapter.getState().queue.currentItemId, target.itemId);
-    assert.equal(adapter.getState().player.track.itemId, target.itemId);
+    assert.equal(adapter.getState().player.track.videoId, target.videoId);
   }));
 
   test(name('同じ videoId の項目が2つあっても itemId で区別できる'), withAdapter(async (adapter) => {
     const items = adapter.getState().queue.items;
-    const duplicated = items.filter(i => i.videoId === items[0].videoId);
-    if (duplicated.length < 2) return;   // 重複を用意していない実装では検査しない
+    const counts = new Map();
+    for (const item of items) counts.set(item.videoId, [...(counts.get(item.videoId) || []), item]);
+    const duplicated = [...counts.values()].find(group => group.length >= 2);
+    // 前提で担保しているので、ここに来て見つからないのは実装側の問題。
+    assert.ok(duplicated, `前提: ${PRECONDITIONS[1]}`);
     assert.notEqual(duplicated[0].itemId, duplicated[1].itemId, '重複曲の itemId が同じ');
     await adapter.selectQueueItem(duplicated[1].itemId);
     assert.equal(adapter.getState().queue.currentItemId, duplicated[1].itemId);
@@ -264,7 +427,7 @@ export function runAdapterContract({ test, label, createAdapter }) {
   test(name('歌詞スナップショットは自分がどの曲のものかを持つ'), withAdapter(async (adapter) => {
     await waitFor(
       () => adapter.getState().lyrics.status !== 'loading',
-      { label: 'lyrics settle' },
+      { ...settle, label: 'lyrics settle' },
     );
     const state = adapter.getState();
     assert.equal(state.lyrics.videoId, state.player.track.videoId);
@@ -272,7 +435,8 @@ export function runAdapterContract({ test, label, createAdapter }) {
   }));
 
   test(name('曲を変えると歌詞は取得中から始まり、前の曲の歌詞を残さない'), withAdapter(async (adapter) => {
-    await waitFor(() => adapter.getState().lyrics.status !== 'loading', { label: 'initial lyrics' });
+    await waitFor(() => adapter.getState().lyrics.status !== 'loading',
+      { ...settle, label: 'initial lyrics' });
     const first = adapter.getState();
     const target = first.queue.items.find(i => i.itemId !== first.queue.currentItemId);
     await adapter.selectQueueItem(target.itemId);
@@ -287,7 +451,8 @@ export function runAdapterContract({ test, label, createAdapter }) {
     // 素早く2回切り替える。1曲目の取得結果が後から届いても採用されてはならない。
     await adapter.selectQueueItem(items[1].itemId);
     await adapter.selectQueueItem(items[0].itemId);
-    await waitFor(() => adapter.getState().lyrics.status !== 'loading', { label: 'lyrics settle' });
+    await waitFor(() => adapter.getState().lyrics.status !== 'loading',
+      { ...settle, label: 'lyrics settle' });
     const state = adapter.getState();
     assert.equal(
       state.lyrics.videoId, state.player.track.videoId,
@@ -296,19 +461,19 @@ export function runAdapterContract({ test, label, createAdapter }) {
   }));
 
   test(name('歌詞の取得状態に empty と error の区別がある'), withAdapter(async (adapter) => {
-    const statuses = new Set(['idle', 'loading', 'ready', 'empty', 'error']);
-    assert.ok(statuses.has(adapter.getState().lyrics.status));
+    assert.ok(new Set(LYRICS_STATUS).has(adapter.getState().lyrics.status));
   }));
 
   /* ---------------- 翻訳 ---------------- */
 
   test(name('翻訳は歌詞本体と独立した取得状態を持つ'), withAdapter(async (adapter) => {
-    await waitFor(() => adapter.getState().lyrics.status === 'ready', { label: 'lyrics ready' });
+    await waitFor(() => adapter.getState().lyrics.status === 'ready',
+      { ...settle, label: 'lyrics ready' });
     assert.equal(adapter.getState().lyrics.translation.status, 'idle');
     await adapter.setTranslationWanted(true);
     await waitFor(
       () => adapter.getState().lyrics.translation.status === 'ready',
-      { label: 'translation ready' },
+      { ...settle, label: 'translation ready' },
     );
     const state = adapter.getState();
     // 歌詞本体は ready のまま。翻訳の到着で歌詞が作り直されていないこと
@@ -317,11 +482,12 @@ export function runAdapterContract({ test, label, createAdapter }) {
   }));
 
   test(name('訳文は行の中ではなく行IDの対応表で持つ'), withAdapter(async (adapter) => {
-    await waitFor(() => adapter.getState().lyrics.status === 'ready', { label: 'lyrics ready' });
+    await waitFor(() => adapter.getState().lyrics.status === 'ready',
+      { ...settle, label: 'lyrics ready' });
     await adapter.setTranslationWanted(true);
     await waitFor(
       () => adapter.getState().lyrics.translation.status === 'ready',
-      { label: 'translation ready' },
+      { ...settle, label: 'translation ready' },
     );
     const { lines, translation } = adapter.getState().lyrics;
     for (const line of lines) {
@@ -331,18 +497,47 @@ export function runAdapterContract({ test, label, createAdapter }) {
   }));
 
   test(name('翻訳を切ると訳文の取得状態が idle へ戻る'), withAdapter(async (adapter) => {
-    await waitFor(() => adapter.getState().lyrics.status === 'ready', { label: 'lyrics ready' });
+    await waitFor(() => adapter.getState().lyrics.status === 'ready',
+      { ...settle, label: 'lyrics ready' });
     await adapter.setTranslationWanted(true);
-    await waitFor(() => adapter.getState().lyrics.translation.status === 'ready', { label: 'translation' });
+    await waitFor(() => adapter.getState().lyrics.translation.status === 'ready',
+      { ...settle, label: 'translation' });
     await adapter.setTranslationWanted(false);
     assert.equal(adapter.getState().lyrics.translation.status, 'idle');
+  }));
+
+  test(name('曲を変えると、前の曲の翻訳が新しい曲のスナップショットへ混ざらない'), withAdapter(async (adapter) => {
+    await waitFor(() => adapter.getState().lyrics.status === 'ready',
+      { ...settle, label: 'lyrics ready' });
+    await adapter.setTranslationWanted(true);
+    await waitFor(() => adapter.getState().lyrics.translation.status === 'ready',
+      { ...settle, label: 'translation ready' });
+    const before = adapter.getState().lyrics;
+    const target = adapter.getState().queue.items
+      .find(i => i.videoId !== before.videoId);
+    await adapter.selectQueueItem(target.itemId);
+    // 歌詞が取得中のあいだ、翻訳が ready のまま前の曲の訳文を抱えていてはならない。
+    const during = adapter.getState().lyrics;
+    if (during.status === 'loading') {
+      assert.notEqual(during.translation.status, 'ready',
+        '歌詞は取得中なのに翻訳だけ ready になっている（前の曲の訳文が残っている）');
+    }
+    await waitFor(() => adapter.getState().lyrics.status !== 'loading',
+      { ...settle, label: 'lyrics settle' });
+    const after = adapter.getState();
+    for (const lineId of Object.keys(after.lyrics.translation.byLineId)) {
+      assert.ok(
+        after.lyrics.lines.some(line => line.id === lineId),
+        `現在曲に存在しない行IDの訳文が残っている: ${lineId}`,
+      );
+    }
   }));
 
   /* ---------------- capabilities ---------------- */
 
   test(name('capabilities が全項目そろっている'), withAdapter((adapter) => {
     const caps = adapter.getState().player.capabilities;
-    for (const key of ['seek', 'volume', 'repeat', 'shuffle', 'queue', 'lyrics', 'translation', 'detectBuffering']) {
+    for (const key of ['seek', 'volume', 'repeat', 'shuffle', 'queue', 'lyrics', 'translation', 'like', 'detectBuffering']) {
       assert.equal(typeof caps[key], 'boolean', `capabilities.${key} が無い`);
     }
   }));
