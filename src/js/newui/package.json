@@ -1,0 +1,4 @@
+{
+  "//": "src/js/newui/ 配下だけを ES モジュールとして扱わせるための宣言。Node がこのフォルダの .js を CommonJS と誤認しないようにする（Node 22 の自動判定に依存しないため）。Chrome の拡張はこのファイルを読まない。manifest からも参照されない。",
+  "type": "module"
+}

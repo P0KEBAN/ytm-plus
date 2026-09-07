@@ -4,12 +4,26 @@
 
 ## 開き方と範囲
 
-`index.html` をChromeで直接開く。ビルド、サーバー、追加ライブラリ、ログインは不要。
+**2026-09-07（Phase 6a）から、ローカルの静的サーバー経由で開く。**
+
+```bash
+node prototype/now-playing/serve.cjs
+# → http://localhost:8080/prototype/now-playing/
+```
+
+ビルド、追加ライブラリ、ログインは不要。サーバーは Node だけで動く数十行で、
+ループバックにしか bind しない。**`index.html` のダブルクリックでは開けなくなった。**
+UI と再生エンジンの境界（Adapter）を `src/js/newui/adapter/` に置き、
+プロトタイプがそれを `import` するようにしたためである。ES モジュールは
+`file://` では読めない。理由と引き換えに得たものは `docs/ADAPTER-CONTRACT.md` §7。
+
 通常画面の「…」→「プロトタイプの確認」で状態を切り替える。
 音声は流れない。時刻、曲長、同期タイミング、翻訳、追加2曲は確認用データ。
 
-- `src/`、`manifest.json`、YouTube MusicのDOM/APIには接続も変更もしていない。
-- 保存、通信、音声再生、拡張への組み込み、コミットは行わない。
+- **`manifest.json` は未変更。YouTube Music の DOM/API には接続も変更もしていない。**
+  Phase 6a で `src/js/newui/adapter/`（契約とモック実装）を新設したが、
+  manifest から読まれないので拡張の動作には一切影響しない。
+- 保存、通信、音声再生、拡張への組み込みは行わない。
 - 初期画面の曲名・アーティスト表記・7行の歌詞は提供モックのまま。
 - `?state=paused` などで状態を直接開ける。`?capture=1` は比較専用で、時計と背景を初期フレームに固定する。
 - 全フォルダをまとめて扱うこと。HTMLだけを別の場所へコピーするとCSS/JS/素材が読めない。
@@ -20,105 +34,57 @@
 
 ## 1. このUIが必要とする状態
 
-以下は型の記述。実装はビルド不要のJavaScript。UIに必要な情報から定義し、YTMの構造へ合わせた型ではない。
+> **【2026-09-07・Phase 6a で置き換え】**
+> ここにあった型（`UIState` / `Track` / `LyricLine` / `Palette`）は、
+> **プロトタイプが持っていた状態**であって Adapter の契約ではなかった。
+> §7 の指摘のとおり、そのまま契約にすると破綻する。
+>
+> **契約の正本は `src/js/newui/adapter/types.js` に移した。**
+> 「なぜその形にしたか」は `docs/ADAPTER-CONTRACT.md`。
+> ここに型を書き写すと必ず食い違うので、書かない。
 
-```ts
-type Repeat = 'NONE' | 'ALL' | 'ONE';
-type LyricsStatus = 'ready' | 'loading' | 'empty' | 'error';
-// UI用の3色と、背景グラデーション用の5色。**背景は5色を必須で読む。**
-// 3色だけ渡すと背景が既定色へフォールバックし、警告が出る（例外では止まらない）。
-type Palette = {
-  ui: { primary: string; secondary: string; shadow: string };        // 抽象ジャケット、バッジ
-  background: { base: string; spot0: string; spot1: string; spot2: string; spot3: string };
-};
-// 実装（mock-data.js）は歴史的な経緯でこれらを1階層に平らに持ち、
-// player.js が `--art-<key>` へそのまま流している。Phase 6 では上の形へ分けること。
-type LyricLine = {
-  id: string;
-  at: number;                // 秒。昇順。表示側へ渡す前に時刻補正済みであること
-  text: string;
-  translation?: string;     // 同じ行IDに対応する訳。試作の訳は確認用
-};
-type Track = {
-  id: string;
-  title: string;
-  artist: string;
-  album: string;            // ジャケットの代替テキストにも使用
-  artwork: string | null;   // URL。null時は配色による抽象的な代替画像
-  palette: Palette;
-  duration: number;         // 秒。この試作は既知の正の曲長のみ
-  lines: LyricLine[];
-};
-type UIState = {
-  trackIndex: number;       // Track[]内の現在曲
-  position: number;         // 秒、小数可
-  duration: number;         // Trackから取得
-  mediaPaused: boolean;    // 再生が停止されているか
-  playing: boolean;        // 通常の再生/停止アイコンを決める情報
-  buffering: boolean;      // バッファリング中か。上2つの比較だけで推測しない
-  volume: number;          // 0〜100の整数。UI音量スケール
-  lastNonzeroVolume: number; // 1〜100。0からの消音解除で戻すローカル設定
-  muted: boolean;          // 音量値と独立した消音
-  repeat: Repeat;
-  shuffle: boolean;
-  lyricsStatus: LyricsStatus;
-  activeLine: number;      // 時刻から導出。-1はまだ該当行なし
-  follow: boolean;         // 自動追従 / 手動閲覧
-  translationEnabled: boolean;
-  view: 'lyrics' | 'queue';
-  highContrast: boolean;  // 読みやすさ優先。初期false
-  motion: boolean;        // 装飾背景を動かす。初期true、OSの動き低減が優先
-};
-```
+いまの分けかたは次のとおり。
 
-| 状態 | 更新契機・使用箇所 |
+| どこが持つか | 何を持つか |
 | --- | --- |
-| Trackとpalette | 前後移動・キュー選曲。ジャケット、曲情報、背景、歌詞、曲長を更新 |
-| position | 試作時計、シーク、歌詞クリック。バーと現在行を更新 |
-| mediaPaused / playing / buffering | 再生・停止・状態選択。再生アイコンと読み込み表示 |
-| volume / muted | 「…」内の音量操作。音量数値をそのまま発行 |
-| repeat / shuffle | ボタン操作。リピート1は数字、ON状態は点とアクセシブル名でも伝達 |
-| lyricsStatus | 曲変更、状態選択、再試行。歌詞と空/取得中/エラー画面を切替 |
-| activeLine | requestAnimationFrame内で時刻から導出。文字の大きさ、ぼかし、追従位置 |
-| follow | ホイール、タッチ、歌詞のフォーカス、スクロールキーでfalse。復帰ボタン・行選択でtrue |
-| translationEnabled | 「…」内の切替。行IDに付いた訳だけを表示 |
-| view | 右下の2ボタン。歌詞/キューを切替 |
-| highContrast / motion | 表示設定。保存せず、そのページだけに適用 |
+| `PlayerSnapshot` | 現在曲 / 再生状態 / 位置 / 曲長（不明なら null） / 音量 / 消音 / リピート / シャッフル / capabilities / pending |
+| `QueueSnapshot` | 取得状態 / **安定IDを持つ**項目 / 現在項目ID |
+| `LyricsSnapshot` | **どの曲の歌詞か** / 取得状態 / 行 / 翻訳の独立した取得状態 |
+| UIローカル（`player.js` の `uiState`） | 表示切替 / 歌詞の自動追従 / 現在行 / コントラスト / 背景の動き / 直前の非ゼロ音量 / ドラッグ中 |
 
-重要な区別：`mediaPaused=false` は「音が実際に出ている」ことの証明ではない。
-モックのローディングは `mediaPaused=false, playing=false, buffering=true`。
-一時停止は `true, false, false`。通常再生は `false, true, false`。
-Adapterもこの違いを保持する。音量を`video.volume`の0〜1へ線形変換しない。
+境界の判断基準は **「YouTube Music を再起動しても復元されるべき値か」**。
 
-キューの現在曲と一覧は`trackIndex`と`Track[]`から導出し、二重の状態を持たない。
-歌詞の行座標、シークドラッグ中フラグ、モーダルの開閉、背景の色補間途中の値は表示内部の状態。
+とくに効いている点を3つだけ挙げる。詳細は `docs/ADAPTER-CONTRACT.md`。
+
+- **再生位置は購読で配らない。** 離散変化は `subscribe()`、毎フレームの位置は
+  `getPosition()`。分けないと歌詞 RAF のために毎フレーム全購読者へ通知が飛ぶ
+- **再生状態は真偽値3つではなく単一の列挙。**
+  `'idle' | 'playing' | 'buffering' | 'paused' | 'ended'`。
+  以前の `mediaPaused` / `playing` / `buffering` は8通りのうち5通りがあり得ない組み合わせだった
+- **歌詞スナップショットは自分がどの曲のものかを持つ。** 曲を変えた直後に
+  前の曲の歌詞が届く事故を、UI 側で弾けるようにするため
 
 ## 2. このUIが発行する操作
 
-`document`上の`CustomEvent('player-action', { detail: { type, ...payload } })`が操作意図の出口。
-同じ操作を試作内の処理が即座に反映する。実機の成功/失敗の応答や通信プロトコルは未実装。
-外部からこのイベントを送ってUIを操作するAPIではない。
+> **【2026-09-07・Phase 6a で置き換え】**
+> `document` 上の `CustomEvent('player-action')` は**廃止した。**
+> 操作の出口は Adapter のメソッドである。一覧は `src/js/newui/adapter/types.js` の
+> `PlayerAdapter`。
+>
+> 変更のうち大きいものは3つ。
+>
+> - `cycleRepeat` / `toggleShuffle` / `toggleMute` のような**相対操作をやめ、
+>   `setRepeat(mode)` / `setShuffle(enabled)` / `setMuted(enabled)` の目標値指定にした。**
+>   外部（YouTube Music 本体のUI・キーボード）で値が変わると相対操作は意図とずれる
+> - `seekToLyricLine(id)` を廃止。UI 側で行IDを秒へ解決して `seek(sec)` を出す
+> - `openQueue` / `closeQueue` / `setHighContrast` / `setMotion` / `resumeLyricFollow` は
+>   UIローカル操作なので Adapter を経由しない
+>
+> **UI は操作の成功を仮定しない。** すべての操作は `Promise<OpResult>` を返し、
+> 応答待ちは `pending` に載る。表示は Adapter から返る正規の状態で確定する。
 
-| type | payload | 意味・試作の結果 |
-| --- | --- | --- |
-| `play` / `pause` | なし | 再生/停止。ローディング中の停止も可能 |
-| `seek` | `{ seconds: number }` | 0〜曲長に制限。ドラッグの確定、またはキー操作で発行 |
-| `next` / `previous` | なし | 次/前の曲へ。手動選曲は末尾/先頭で循環 |
-| `selectQueueItem` | `{ id: string }` | 曲IDによる選曲。現在曲の表示と背景色を更新 |
-| `setVolume` | `{ value: number }` | 0〜100の整数。試作のスライダー操作中に反映 |
-| `toggleMute` | なし | 正の音量は保持して消音切替。音量0時は直前の非ゼロ値へ戻す |
-| `toggleShuffle` | なし | ON/OFF。ONで次曲は現在曲以外から選択 |
-| `cycleRepeat` | なし | NONE → ALL → ONE → NONE |
-| `setTranslationEnabled` | `{ enabled: boolean }` | 対応訳の表示/非表示 |
-| `seekToLyricLine` | `{ id: string }` | 行IDの時刻へ移動し自動追従を再開 |
-| `resumeLyricFollow` | なし | 現在行へ復帰。フォーカスは歌詞領域へ移す |
-| `openQueue` / `closeQueue` | なし | 右側をキュー/歌詞へ切替 |
-| `retryLyrics` | なし | 取得中を表示。試作は650ms後に成功する |
-| `setHighContrast` | `{ enabled: boolean }` | 背景を暗くし、歌詞のぼかしを外す |
-| `setMotion` | `{ enabled: boolean }` | 背景の装飾的な変形を停止/再開 |
-
-「…」の開閉と試作状態選択はローカル表示操作で、再生エンジンの操作ではない。
-設定の永続化はない。将来保存する場合もRAF中やドラッグ中に書き込まない。
+自動検証だけは、`?probe=1` を付けたときに `player.js` が Adapter への操作呼び出しを
+`window.__adapterCalls` へ記録する。**検証用の窓であり、UI の制御経路ではない。**
 
 ### 操作規則
 
@@ -130,8 +96,9 @@ Adapterもこの違いを保持する。音量を`video.volume`の0〜1へ線形
 - 設定はネイティブdialog。内部にフォーカスを閉じ、Escape/閉じるで「…」へ戻す。
 - 手動スクロール中は自動追従を止める。「現在の歌詞に戻る」で再開。
 - 現在行は歌詞領域の上から128設計pxに置く。長い行は可変高さで折り返し、行座標を再計測する。
-- 曲末尾：ONEは同曲先頭、ALLは次曲へ循環、NONEは一覧の最後で停止。
-- ブラウザ非表示中は試作時計とRAFを停止する。実際の音声エンジンが進む場合の時刻は将来Adapterが供給する。
+- 曲末尾：ONEは同曲先頭、ALLは次曲へ循環、NONEは一覧の最後で停止。**この判断は Adapter が持つ。**
+- ブラウザ非表示中はRAFを止める。**再生位置は Adapter が持っているので、
+  描画を止めても時刻はずれない**（以前は `player.js` が時計を持っていたため復帰時にずれた）。
 
 ## 3. モックから読み取った数値
 
@@ -409,8 +376,25 @@ playwright はこのプロジェクトの依存ではないので、場所を環
 - 再生キー、3状態リピート、整数音量、シーク、消音、キュー選曲とフォーカス復帰、歌詞クリック、手動スクロール復帰、再試行を確認。
 - `prefers-reduced-motion`で背景が静止することと、通常時に背景が変化することを、前景を除いたスクリーンショットで確認。
 - 外部HTTP(S)リクエスト0、ブラウザJavaScriptエラー0。
-- 補足検証：翻訳末尾のフェード、ローカルHTTPプレビュー、WebGL無効時の静止背景と色変更も成功。
-- 既存の構文チェックとテスト：84 pass / 7 skip / 0 fail。
+- 補足検証：翻訳末尾のフェード、WebGL無効時の静止背景と色変更も成功。
+- 既存の構文チェックとテスト：**145 pass / 7 skip / 0 fail**（2026-09-07 時点）。
+  内訳は既存 106 + Adapter 契約テスト 39。
+
+**Phase 6a の書き換え後、書き換え前と画素で比較して退行が無いことを確認した（2026-09-07）。**
+`feeb06a` を worktree に取り出して同じ条件で撮り、全画面を1画素ずつ比べた。
+
+| 比較 | 結果 |
+| --- | --- |
+| 9状態 × 1440×900（遷移が終わるまで待って撮影） | **全て完全一致** |
+| `check.cjs` が撮る13枚 | `1440-loading.png` 以外は**完全一致** |
+| キュー画面・設定ダイアログ・キュー選曲直後・2曲目の歌詞 | **全て完全一致** |
+
+`1440-loading.png` だけ 0.038%（最大 122/255）差が出るが、これは `#spinner` の
+`animation: spin 1s linear infinite` の回転位相で、**本質的に非決定**である。
+
+この比較の過程で `check.cjs` の待ち時間の不足が3箇所見つかったので直した。
+現在行の `filter/opacity` は .35s、`.icon:active` の `transform` は .15s、
+翻訳は Adapter が遅れて届ける。**待たずに撮ると実行ごとに絵が変わって比較できない。**
 
 歌詞のRAFはキャッシュされた時刻配列を二分探索する。行の切替時だけclassを変更する。
 DOM全体の再構築は曲変更と翻訳切替時だけ。行座標は行変更・翻訳・ResizeObserverによる変更時だけ読む。
@@ -427,6 +411,11 @@ DOM全体の再構築は曲変更と翻訳切替時だけ。行座標は行変�
 このレビューが終わるまではPhase 5完了やAdapter接続開始としない。
 
 ## 7. Phase 6 へ渡す前に直すこと（2026-09-07 レビューの結果）
+
+> **【2026-09-07・Phase 6a で全8件に対処した】**
+> 契約は `src/js/newui/adapter/types.js`、判断の理由は `docs/ADAPTER-CONTRACT.md`。
+> `tests/adapter-contract.test.mjs` が 39 件でこれを機械的に守っている。
+> **以下は「何が問題だったか」の記録として残す。**
 
 Codex に別の目でレビューさせた結果、**このファイルの §1・§2 をそのまま Adapter 契約として
 使うと破綻する**ことが分かった。ここは「プロトタイプUIが持っている状態」であって、
@@ -459,3 +448,21 @@ Adapter操作      setRepeat(mode) / setShuffle(enabled) / setMuted(enabled) な
 
 この表は Phase 6 の入力である。**Phase 5 のプロトタイプ自体の不具合ではない**ので、
 プロトタイプの承認をこれで止める必要はない。
+
+### 対処（2026-09-07・Phase 6a）
+
+| # | 対処 |
+| --- | --- |
+| 1 | `Track[]` を廃止。`QueueSnapshot` が自分で項目を持つ |
+| 2 | `trackIndex` を廃止し、`itemId`（キュー項目）と `videoId`（曲）を分けた |
+| 3 | 歌詞を曲から切り離し、`LyricsSnapshot` として遅延取得する |
+| 4 | 真偽値3つを `'idle'\|'playing'\|'buffering'\|'paused'\|'ended'` の単一列挙にした |
+| 5 | 曲長 `null`、`seekable`、`QueueStatus` / `LyricsStatus` / `TranslationStatus`、`pending`、`OpResult` を型に入れた |
+| 6 | `setRepeat(mode)` / `setShuffle(enabled)` / `setMuted(enabled)` の目標値指定にした |
+| 7 | UIローカル状態を `player.js` の `uiState` へ分離した |
+| 8 | `seekToLyricLine` を廃止。UI が行IDを秒へ解決して `seek(sec)` を出す |
+
+**契約に入れなかったが実装で判明した、もっとも効いた設計判断**は
+「再生位置を購読で配らない」ことである（`subscribe()` と `getPosition()` の分離）。
+これが無いと歌詞 RAF のために毎フレーム全購読者へ通知が飛ぶ。
+`docs/ADAPTER-CONTRACT.md` §3.2。

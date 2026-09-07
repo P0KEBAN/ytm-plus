@@ -5,9 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ytm-plus — Now Playing Prototype</title>
   <link rel="stylesheet" href="style.css">
-  <script defer src="mock-data.js"></script>
+  <!-- smoke.js / tune.js は window.Smoke 経由で繋がる従来スクリプト。
+       player.js は ES モジュールで、mock-data.js と src/js/newui/adapter/ を import する。
+       defer なスクリプトとモジュールは文書順に実行されるので、smoke.js は player.js より先に走る。
+       **file:// では ES モジュールが読めないため、serve.cjs 経由で開くこと。** -->
   <script defer src="smoke.js"></script>
-  <script defer src="player.js"></script>
+  <script type="module" src="player.js"></script>
   <script defer src="tune.js"></script>
 </head>
 <body>

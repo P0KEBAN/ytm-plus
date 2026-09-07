@@ -6,19 +6,47 @@
  * 出力先の既定は private-docs/phase5-verification/（git 追跡外）。
  * YTM_OUT で変えられる。
  *
+ * Phase 6a で UI が ES モジュールになったため file:// では開けない。
+ * このスクリプトは serve.cjs と同じ静的サーバーを自分で立ち上げて http:// で開く。
+ * 別途 serve.cjs を起動しておく必要はない。
+ *
  * 見た目を変えたら必ずこれを通すこと。目視だけでは、
  * 「アイコンは差し替わったが再生アイコンが一度も表示されない」類の不具合を見逃す。 */
 const { chromium } = require(process.env.YTM_PLAYWRIGHT || 'playwright');
 const fs = require('fs');const assert=require('node:assert/strict');
 const dir=process.env.YTM_OUT || require('node:path').resolve(__dirname,'../../private-docs/phase5-verification');
 require('fs').mkdirSync(dir,{recursive:true});
-const base=require('node:url').pathToFileURL(require('node:path').resolve(__dirname,'index.html')).href;
+// ES モジュールは file:// では読めないので、検証用の静的サーバーを内蔵する。
+// ポート0で OS に空きポートを選ばせるため、他のプロセスと衝突しない。
+const http=require('node:http'),path=require('node:path');
+const ROOT=path.resolve(__dirname,'..','..');
+const TYPES={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp','.svg':'image/svg+xml','.woff2':'font/woff2'};
+const server=http.createServer((req,res)=>{
+ let p; try{p=decodeURIComponent(new URL(req.url,'http://localhost').pathname)}catch{res.writeHead(400).end();return}
+ if(p.endsWith('/'))p+='index.html';
+ const file=path.join(ROOT,p);
+ if(!file.startsWith(ROOT+path.sep)){res.writeHead(403).end();return}
+ fs.readFile(file,(e,data)=>{
+  if(e){res.writeHead(404,{'content-type':'text/plain'}).end('not found');return}
+  res.writeHead(200,{'content-type':TYPES[path.extname(file).toLowerCase()]||'application/octet-stream','cache-control':'no-store'});
+  res.end(data);
+ });
+});
 (async()=>{
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const origin=`http://127.0.0.1:${server.address().port}`;
+ const base=`${origin}/prototype/now-playing/index.html`;
  const browser=await chromium.launch({channel:'chrome',headless:true});
  const page=await browser.newPage({viewport:{width:1920,height:1080},deviceScaleFactor:1});
- const errors=[],requests=[],checks=[]; page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(/^https?:/.test(r.url()))requests.push(r.url())});
- await page.addInitScript(()=>{window.frameCosts=[];const original=requestAnimationFrame;window.requestAnimationFrame=fn=>original.call(window,now=>{const start=performance.now();fn(now);if(window.frameCosts.length<1200)window.frameCosts.push(performance.now()-start)});window.actions=[];document.addEventListener('player-action',e=>window.actions.push(e.detail));});
- async function load(state='playing',capture=true){await page.goto(base+`?state=${state}${capture?'&capture=1':''}`);await page.waitForFunction(()=>document.querySelector('#smoke').dataset.renderer);await page.waitForTimeout(150);}
+ // 「外部へ通信していないこと」の検査。検証用ローカルサーバー自身への要求は外部ではない。
+ const errors=[],requests=[],checks=[]; page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{const u=r.url();if(/^https?:/.test(u)&&!u.startsWith(origin))requests.push(u)});
+ await page.addInitScript(()=>{window.frameCosts=[];const original=requestAnimationFrame;window.requestAnimationFrame=fn=>original.call(window,now=>{const start=performance.now();fn(now);if(window.frameCosts.length<1200)window.frameCosts.push(performance.now()-start)});});
+ // ?probe=1 で player.js が window.__adapterCalls に Adapter への操作を記録する。
+ // 旧実装の player-action イベントは Adapter が出口になったので廃止した。
+ async function load(state='playing',capture=true){await page.goto(base+`?state=${state}&probe=1${capture?'&capture=1':''}`);await page.waitForFunction(()=>document.querySelector('#smoke').dataset.renderer&&window.__adapterCalls);
+  // 現在行の filter/opacity は .35s で遷移する。150ms だと遷移の途中を撮ってしまい、
+  // スクリーンショットが実行ごとに変わって比較できない。遷移が終わるまで待つ。
+  await page.waitForTimeout(500);}
  const check=(name,ok)=>{assert.ok(ok,name);checks.push(name)};
  // aria-label ではなく「実際に描かれているか」を見る。SVG化のとき、aria は正しいのに
  // 再生アイコンが一度も表示されない不具合が検証をすり抜けた実績がある。
@@ -29,7 +57,8 @@ const base=require('node:url').pathToFileURL(require('node:path').resolve(__dirn
  }));
  const paintedIs=async(name,expected)=>{const got=await painted();
    check(`${name}: 描画されているのは ${expected} だけ`, got.length===1 && got[0]===expected);};
- await load();check('file:// WebGL renders',await page.locator('#smoke').getAttribute('data-renderer')==='webgl');
+ await load();check('http:// で ES モジュールが読め、WebGL が描画される',await page.locator('#smoke').getAttribute('data-renderer')==='webgl');
+ check('Adapter の契約経由で描画されている',await page.evaluate(()=>Array.isArray(window.__adapterCalls)));
  await page.screenshot({path:dir+'/1920-final.png'});
  for (const size of [{width:1440,height:900},{width:1100,height:700}]) {
   await page.setViewportSize(size);await page.waitForTimeout(150);
@@ -47,19 +76,26 @@ const base=require('node:url').pathToFileURL(require('node:path').resolve(__dirn
  await page.locator('#shuffle').click();check('shuffle toggle',await page.locator('#shuffle').getAttribute('aria-pressed')==='true');
  await page.locator('#repeat').click();await page.locator('#repeat').click();
  check('リピート1のバッジが描画される',await page.evaluate(()=>{const b=document.querySelector('.repeat-one');const r=b.getBoundingClientRect();return !b.hidden&&r.width>0&&r.height>0}));
- await page.screenshot({path:dir+'/1440-shuffle-repeat-one.png'});
+ await page.waitForTimeout(300);await page.screenshot({path:dir+'/1440-shuffle-repeat-one.png'});
  await page.locator('#repeat').click();await page.locator('#shuffle').click();
  await page.locator('#seek').focus();const before=Number(await page.locator('#seek').inputValue());await page.keyboard.press('ArrowRight');check('seek integer keyboard step',Number(await page.locator('#seek').inputValue())===before+1);
- check('seek event emitted once',await page.evaluate(()=>window.actions.filter(a=>a.type==='seek').length)===1);
+ check('seek is issued exactly once per key press',await page.evaluate(()=>window.__adapterCalls.filter(c=>c.method==='seek').length)===1);
  await page.locator('#more').click();await page.locator('#volume').focus();await page.keyboard.press('Home');await page.keyboard.press('ArrowRight');check('volume 0–100 integer scale',await page.locator('#volume').inputValue()==='1');
  await page.locator('#mute').click();check('mute independent',await page.locator('#mute').getAttribute('aria-pressed')==='true');await page.locator('#mute').click();check('unmute preserves volume',await page.locator('#volume').inputValue()==='1');
  await page.keyboard.press('Escape');check('dialog returns focus',await page.evaluate(()=>document.activeElement.id)==='more');
  await page.locator('#queue-view').click();check('queue focus moves to item',await page.evaluate(()=>document.activeElement.classList.contains('queue-item')));
- await page.locator('.queue-item').nth(1).click();check('queue selects warm track',await page.locator('#title').textContent()==='夜明けまであと少しだけ、この街の音を聴いていたい');
+ await page.locator('.queue-item').nth(1).click();
+ // 操作は Adapter 経由で非同期に確定する。UI は成功を先取りしないので待つ。
+ await page.locator('#title').filter({hasText:'夜明けまであと少しだけ'}).waitFor();
+ check('queue selects warm track',await page.locator('#title').textContent()==='夜明けまであと少しだけ、この街の音を聴いていたい');
  check('palette source updated',await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--art-primary').trim())==='#a34b38');
  await page.keyboard.press('Escape');check('queue Escape restores trigger focus',await page.evaluate(()=>document.activeElement.id)==='queue-view');
  await page.setViewportSize({width:1100,height:700});await load('long');
- await page.locator('#more').click();await page.locator('#translation').check();await page.keyboard.press('Escape');await page.waitForTimeout(150);
+ await page.locator('#more').click();await page.locator('#translation').check();await page.keyboard.press('Escape');
+ // 翻訳は Adapter が遅れて届ける（歌詞本体とは独立した取得）。到着を待ってから撮る。
+ await page.locator('.translation').first().waitFor({state:'visible'});
+ // 訳文が入ると行の高さが変わり、追従が再スクロールする。それも待つ。
+ await page.waitForTimeout(700);
  check('long translated lyrics wrap within panel',await page.locator('.lyric-line').evaluateAll(es=>es.every(e=>e.scrollWidth<=e.clientWidth+1)));
  check('full long metadata accessible',await page.locator('#title').getAttribute('title')===await page.locator('#title').textContent());
  await page.screenshot({path:dir+'/1100-long-translated.png'});
@@ -68,13 +104,16 @@ const base=require('node:url').pathToFileURL(require('node:path').resolve(__dirn
   await load(state);await page.screenshot({path:dir+`/1440-${state}.png`});
   if(state==='paused')await paintedIs('状態paused','play-icon');
   if(state==='loading'){check('buffering separate from paused',await page.locator('#spinner').isVisible()&&await page.locator('#playback-message').textContent()==='読み込み中…');await paintedIs('状態loading','spinner');}
-  if(state==='translation')check('translated lines visible',await page.locator('.translation').count()===7);
+  if(state==='translation')check('translated lines visible',await page.locator('.translation').evaluateAll(es=>es.filter(e=>!e.hidden&&e.textContent.trim()).length)===7);
   if(state==='lyrics-error'){await page.locator('#retry').click();check('retry loading visible',await page.locator('#lyric-message-text').textContent()==='歌詞を読み込んでいます…');await page.waitForTimeout(800);check('retry recovers mock lyrics',await page.locator('#lyric-viewport').isVisible());}
  }
  await load();await page.locator('#lyric-viewport').hover();await page.mouse.wheel(0,150);await page.locator('#resume-follow').waitFor({state:'visible'});check('manual scroll suspends follow',await page.locator('#resume-follow').isVisible());
  await page.locator('#resume-follow').click();check('resume hides return button',!(await page.locator('#resume-follow').isVisible()));
- await page.locator('.lyric-line').nth(3).click();check('line click seeks',Number(await page.locator('#seek').inputValue())===156);
- await page.locator('#next').focus();await page.screenshot({path:dir+'/1440-focus.png'});
+ await page.locator('.lyric-line').nth(3).click();await page.waitForTimeout(120);
+ check('line click seeks',Number(await page.locator('#seek').inputValue())===156);
+ await page.locator('#next').focus();
+ // 行を選ぶと現在行が動き、追従がなめらかにスクロールする。落ち着くまで待つ。
+ await page.waitForTimeout(600);await page.screenshot({path:dir+'/1440-focus.png'});
  await page.emulateMedia({reducedMotion:'reduce'});await load('playing',false);
  await page.addStyleTag({content:'.stage,.view-switch { visibility: hidden !important; }'});const bg1=await page.locator('#smoke').screenshot();await page.waitForTimeout(500);const bg2=await page.locator('#smoke').screenshot();check('reduced motion freezes smoke',bg1.equals(bg2));
  await page.emulateMedia({reducedMotion:'no-preference'});await load('playing',false);await page.addStyleTag({content:'.stage,.view-switch { visibility: hidden !important; }'});const smoke1=await page.locator('#smoke').screenshot();await page.waitForTimeout(1800);const smoke2=await page.locator('#smoke').screenshot();check('smoke really animates',!smoke1.equals(smoke2));
@@ -112,5 +151,5 @@ const base=require('node:url').pathToFileURL(require('node:path').resolve(__dirn
  check('コントラスト測定を書き出した',Object.keys(contrast).length===3);
  check('no external requests',requests.length===0);check('no browser JS errors',errors.length===0);
  const report={checks,errors,externalRequests:requests,contrast,performance:{...metrics,steadyLayoutCount:m2.LayoutCount-m1.LayoutCount,steadyLayoutDurationMs:(m2.LayoutDuration-m1.LayoutDuration)*1000},browser:browser.version()};
- fs.writeFileSync(dir+'/checks.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));await browser.close();
-})().catch(e=>{console.error(e);process.exit(1)});
+ fs.writeFileSync(dir+'/checks.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));await browser.close();server.close();
+})().catch(e=>{console.error(e);server.close();process.exit(1)});
