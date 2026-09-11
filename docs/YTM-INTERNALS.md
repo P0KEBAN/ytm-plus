@@ -295,9 +295,36 @@ shuffleEnabled, shuffleEndpoints, steeringChips, watchNextType
 こちらのほうが正確。** リピート・シャッフルの状態もここから読めるので、
 `bar` の getter と合わせて二重に持つ必要はない。
 
-**未確認**: Redux ストアなので `store.subscribe()` が使えればポーリングを購読へ
-置き換えられる可能性が高いが、**まだ確認していない**。Phase 6 の実装時に確認し、
-駄目ならポーリングのままにする。
+### 6.1 Phase 6b 再実測（2026-09-11 / Chrome 153）
+
+`bar.queue.store.subscribe()` は使用でき、解除関数も返す。リピートを3回変更した実測では
+ストア通知も3回届いた。したがって、`replay-manager.js` の1秒ポーリングは購読へ置き換えられる。
+
+`items[]` は `{ playlistPanelVideoRenderer: {...} }` で、項目IDの候補は
+`playlistPanelVideoRenderer.playlistSetVideoId`。先頭8件で全件一意、1.5秒後の再読込でも全件不変だった。
+同じ場所に曲のIDである `videoId` も別に存在する。Adapterでは曲とキュー項目を区別するため、
+`itemId = playlistSetVideoId`、`videoId = videoId` とする。今回の状態では `nextQueueItemId = 50`、
+`items.length = 50` だった。
+
+リピートボタンのクリック後、`bar.repeatMode` は `NONE → ALL → ONE → NONE` の全遷移で
+同じイベント内に更新された（0.0〜0.1ms）。長い確認待ちは不要だが、MAIN world往復や将来の
+YTM変更に備え、Adapter側では短い上限付き確認を残す。
+
+評価の現在値はプレイヤーバー内の `ytmusic-like-button-renderer.likeStatus` から
+`"INDIFFERENT"` として取得でき、同じ値が `like-status` 属性にも反映されていた。
+高評価・低評価ボタンの `aria-pressed` もそれぞれ `false`。状態の正本にはMAIN worldの
+`likeStatus` を使い、DOM属性は診断用の代替経路に留める。
+
+### 6.2 背景GPUの実ブラウザ計測（2026-09-11 / Chrome 153）
+
+1920×929、DPR 1、`powerPreference: "low-power"` のWebGLコンテキストで、
+`drawArrays()` の直後に `gl.finish()` を入れてGPU完了まで同期して120回計測した。
+レンダラーは `ANGLE Metal Renderer: Apple M4 Pro`。平均0.034ms、p95 0.10ms、
+p99 0.20ms、最大0.20msだった。現在のM4 Pro環境では描画時間に十分な余裕がある。
+
+ただしM4 Proは低性能GPUではない。この結果は低性能機での受入確認を代替しない。
+背景性能はPlayer Adapterの契約を変えないため、2026-09-11のユーザー判断でPhase 6cの
+着手ゲートから外し、実背景を接続するPhase 7の受入条件へ移した。
 
 ---
 

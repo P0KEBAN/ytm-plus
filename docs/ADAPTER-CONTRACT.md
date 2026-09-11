@@ -133,12 +133,11 @@ UI は等値比較しかしない。次送り・前送り・選曲・自動送�
 UI 側も、曲名の読み上げは `videoId` の変化で、歌詞追従のリセットは `instanceId` の変化で
 行うように分けてある。リピートONEで同じ曲名を繰り返し読み上げないため。
 
-> **未実測（Phase 6b で確認する）**: YouTube Music の
-> `bar.queue.store.getState().queue` に `nextQueueItemId` というキーがあったので、
-> 項目にIDが振られている可能性が高い。**まだ確認していない。**
-> 無ければ `videoId#index` の合成IDへ落とすが、その場合は並べ替えで壊れることを
-> Adapter が知っている状態にする。**ここは推測で決めないこと。**
-> ただし上のとおり、**その結果に関係なく `instanceId` と `currentItemId` の分離は成り立つ。**
+> **Phase 6b 実測済み（2026-09-11）**: キュー項目には
+> `playlistPanelVideoRenderer.playlistSetVideoId` があり、先頭8件で一意、1.5秒後の再読込でも
+> 不変だった。`itemId` にはこれを使い、曲IDの `videoId` と分ける。詳細は §5 と
+> `docs/YTM-INTERNALS.md` §6.1。ただし上のとおり、
+> **`instanceId` と `currentItemId` の分離はこの結果に依存せず成り立つ。**
 
 ### 3.4 歌詞スナップショットは自分がどの曲のものかを持つ
 
@@ -294,16 +293,17 @@ Adapter の購読へ置き換えられるのも、この形にしたときであ
 
 **推測で埋めないこと。** ここが埋まるまで `YtmAdapter` の実装を始めない。
 
-| # | 測ること | 埋まらないと何が困るか |
-| --- | --- | --- |
-| 1 | `bar.queue.store.getState().queue.items[]` に**安定した項目IDがあるか**（`nextQueueItemId` の周辺） | `itemId` の正本が決まらない。設計の根幹（§3.3） |
-| 2 | `bar.queue.store.subscribe()` が使えるか | 使えれば `replay-manager.js` の1秒ポーリングを消せる。`YTM-INTERNALS.md` §6 に「未確認」と明記された宿題 |
-| 3 | `.repeat` をクリックしてから `bar.repeatMode` が更新されるまでの遅延 | §3.6 の確認ループのタイムアウト値の根拠がない |
-| 4 | 低電力GPUでの背景の実測 | `prototype/now-playing/SPEC.md` が Phase 6 の完了条件に入れろと書いている |
-| 5 | 評価（いいね／低評価）の**現在値を読む経路**。MAIN world から取れるか、`ytmusic-like-button-renderer` の DOM を見るしかないか | `likeStatus` を目標値指定で実装できない。トグルしか無い場合、確認ループの根拠が #3 と同じく必要（§3.11） |
+| # | 測ること | 実測結果（2026-09-11 / Chrome 153） | 状態 |
+| --- | --- | --- | --- |
+| 1 | `bar.queue.store.getState().queue.items[]` に**安定した項目IDがあるか** | `playlistPanelVideoRenderer.playlistSetVideoId` が先頭8件で一意・再読込後も不変。曲ID `videoId` とは別 | **完了** |
+| 2 | `bar.queue.store.subscribe()` が使えるか | 使用可能。解除関数あり。リピート3遷移で通知3回 | **完了** |
+| 3 | `.repeat` クリックから `bar.repeatMode` 更新までの遅延 | 3遷移とも同じイベント内（0.0〜0.1ms） | **完了** |
+| 4 | 低電力GPUでの背景の実測 | M4 Pro実機ではGPU完了待ち込み120回のp95 0.10ms、最大0.20ms。低性能GPUの確認は実背景を接続するPhase 7へ移す | **Phase 6bとして完了** |
+| 5 | 評価（いいね／低評価）の現在値を読む経路 | MAIN worldの `ytmusic-like-button-renderer.likeStatus` で `INDIFFERENT` を取得。`like-status` 属性にも同値 | **完了** |
 
-実機プローブの取り出し方と、**測り終わったら必ず消すこと**は
-`docs/YTM-INTERNALS.md` §1.3 にある。
+詳細な値と解釈は `docs/YTM-INTERNALS.md` §6.1〜6.2。実測プローブは測定後に削除済み。
+背景性能はPlayer Adapterの契約を変えないため、2026-09-11のユーザー判断で低性能GPUの
+受入確認をPhase 7へ移した。したがってPhase 6bは完了し、Phase 6cへ着手できる。
 
 ---
 
